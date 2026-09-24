@@ -22,6 +22,7 @@ WEEKLY_PLAN = {
         "prayers": True,
         "tasks": [
             {"id": "zal", "time": "09:00", "label": "Zal mashg'uloti", "note": "9:00-11:00"},
+            {"id": "fizikadan tayyorlanish", "time": "07:20", "label": "nazariy qism va tayyorlanish", "note": "7:20-840"},
             {"id": "dush1", "time": "11:00", "label": "Dush, kiyinish"},
             {"id": "universitet", "time": "13:40", "label": "Universitet darslari boshlanadi"},
             {"id": "yotish", "time": "22:00", "label": "Yotish vaqti!", "note": "Ertaga bomdodga turish uchun muhim"},
@@ -30,6 +31,7 @@ WEEKLY_PLAN = {
     1: {  # Seshanba
         "prayers": True,
         "tasks": [
+            {"id": "fizikadan tayyorlanish", "time": "07:20", "label": "nazariy qism va tayyorlanish", "note": "7:20-840"},
             {"id": "universitet", "time": "13:40", "label": "Universitet darslari boshlanadi"},
             {"id": "basseyn", "time": "19:00", "label": "Basseyn", "note": "19:00-21:00"},
             {"id": "yotish", "time": "22:00", "label": "Yotish vaqti!"},
@@ -39,6 +41,7 @@ WEEKLY_PLAN = {
         "prayers": True,
         "tasks": [
             {"id": "zal", "time": "09:00", "label": "Zal mashg'uloti", "note": "9:00-11:00"},
+            {"id": "fizikadan tayyorlanish", "time": "07:20", "label": "nazariy qism va tayyorlanish", "note": "7:20-840"},
             {"id": "dush1", "time": "11:00", "label": "Dush, kiyinish"},
             {"id": "universitet", "time": "13:40", "label": "Universitet darslari boshlanadi"},
             {"id": "yotish", "time": "22:00", "label": "Yotish vaqti!"},
@@ -47,6 +50,7 @@ WEEKLY_PLAN = {
     3: {  # Payshanba
         "prayers": True,
         "tasks": [
+            {"id": "fizikadan tayyorlanish", "time": "07:20", "label": "nazariy qism va tayyorlanish", "note": "7:20-840"},
             {"id": "universitet", "time": "13:40", "label": "Universitet darslari boshlanadi"},
             {"id": "basseyn", "time": "19:00", "label": "Basseyn", "note": "19:00-21:00"},
             {"id": "yotish", "time": "22:00", "label": "Yotish vaqti!"},
@@ -55,6 +59,7 @@ WEEKLY_PLAN = {
     4: {  # Juma
         "prayers": True,
         "tasks": [
+            {"id": "fizikadan tayyorlanish", "time": "17:20", "label": "nazariy qism va tayyorlanish", "note": "17:20-18:40"},
             {"id": "ish", "time": "07:00", "label": "Maktabga (ishga)"},
             {"id": "ish_tugash", "time": "14:45", "label": "Ish tugadi", "note": "Endi o'qish/tayyorgarlik vaqti"},
             {"id": "zal", "time": "18:00", "label": "Zal mashg'uloti", "note": "18:00-20:00"},
@@ -64,6 +69,7 @@ WEEKLY_PLAN = {
     5: {  # Shanba
         "prayers": True,
         "tasks": [
+            {"id": "fizikadan tayyorlanish", "time": "17:20", "label": "nazariy qism va tayyorlanish", "note": "17:20-18:40"},
             {"id": "ish", "time": "07:00", "label": "Maktabga (ishga)"},
             {"id": "ish_tugash", "time": "14:45", "label": "Ish tugadi"},
             {"id": "basseyn", "time": "19:00", "label": "Basseyn", "note": "19:00-21:00"},

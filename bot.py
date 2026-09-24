@@ -4,6 +4,7 @@ Python 3.10+, aiogram 3.x, APScheduler, requests (Aladhan API).
 """
 
 import asyncio
+import html
 import logging
 import os
 import re
@@ -122,7 +123,10 @@ def done_keyboard(item_id: str) -> InlineKeyboardMarkup:
 
 
 async def send_reminder(text: str, item_id: str):
-    await bot.send_message(CHAT_ID, text, reply_markup=done_keyboard(item_id))
+    try:
+        await bot.send_message(CHAT_ID, text, reply_markup=done_keyboard(item_id))
+    except Exception as e:
+        logger.error(f"Eslatma yuborishda xatolik ({item_id}): {e}")
 
 
 @dp.callback_query(F.data.startswith("done:") | F.data.startswith("skip:"))
@@ -133,6 +137,16 @@ async def handle_mark(callback: CallbackQuery):
     mark = "✅" if status == "done" else "❌"
     await callback.message.edit_text(f"{callback.message.text}\n\n{mark} Belgilandi.")
     await callback.answer()
+
+
+@dp.errors()
+async def global_error_handler(event):
+    """
+    Har qanday handler ichida kutilmagan xato yuz bersa, botni yiqitmasdan
+    faqat log yozadi va ishlashda davom etadi.
+    """
+    logger.exception(f"Kutilmagan xatolik: {event.exception}")
+    return True
 
 
 # --- Kunlik rejalashtirish: har kuni ertalab o'sha kun uchun barcha eslatmalarni jadvalga qo'yish ---
@@ -192,7 +206,7 @@ async def schedule_today_reminders():
             send_reminder,
             trigger="date",
             run_date=run_time,
-            args=[f"⏰ <b>{item['text']}</b>", item_id],
+            args=[f"⏰ <b>{html.escape(item['text'])}</b>", item_id],
             id=f"job_{item_id}",
             replace_existing=True,
         )
@@ -209,7 +223,7 @@ async def schedule_today_reminders():
             fire_once_reminder,
             trigger="date",
             run_date=run_time,
-            args=[f"📅 <b>{item['text']}</b>", item_id, rid],
+            args=[f"📅 <b>{html.escape(item['text'])}</b>", item_id, rid],
             id=f"job_{item_id}",
             replace_existing=True,
         )
@@ -236,7 +250,7 @@ async def cmd_start(message: Message):
         "/shahar — namoz vaqtlari hisoblanadigan shaharni o'zgartirish\n"
         "/qoshish — yangi eslatma qo'shish (har kuni / haftalik / aniq sana)\n"
         "/royxat — qo'shilgan maxsus eslatmalar ro'yxati\n"
-        "/ochirish <ID> — maxsus eslatmani o'chirish\n"
+        "/ochirish — maxsus eslatmani o'chirish (masalan: /ochirish 3)\n"
         "/bekor — eslatma qo'shish jarayonini bekor qilish"
     )
 
@@ -404,9 +418,9 @@ async def process_text(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer(
-        f"✅ Eslatma qo'shildi (ID: {rid}):\n<b>{text}</b>\n{desc}\n\n"
+        f"✅ Eslatma qo'shildi (ID: {rid}):\n<b>{html.escape(text)}</b>\n{desc}\n\n"
         "Bu eslatma bugungi/keyingi kunlar uchun avtomatik ishlaydi. "
-        "Ro'yxatni ko'rish uchun /royxat, o'chirish uchun /ochirish <ID>."
+        "Ro'yxatni ko'rish uchun /royxat, o'chirish uchun /ochirish (masalan: /ochirish 3)."
     )
 
 
@@ -424,8 +438,8 @@ async def cmd_list_custom(message: Message):
             when = f"Har {WEEKDAY_NAMES_UZ[item['weekday']]} {item['time']}"
         else:
             when = f"{item['date']} {item['time']} (bir marta)"
-        lines.append(f"#{item['id']} — {item['text']} ({when})")
-    lines.append("\nO'chirish uchun: /ochirish <ID>")
+        lines.append(f"#{item['id']} — {html.escape(item['text'])} ({when})")
+    lines.append("\nO'chirish uchun: /ochirish (masalan: /ochirish 3)")
     await message.answer("\n".join(lines))
 
 

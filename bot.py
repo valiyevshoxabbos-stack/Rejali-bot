@@ -299,7 +299,8 @@ def schedule_single_custom(reminder_id: int, time_str: str, text: str, once: boo
 async def cmd_start(message: Message):
     await message.answer(
         "Assalomu alaykum, Umarkhan!\n\n"
-        "Men sizning kunlik rejangiz va namoz vaqtlarini eslatib turaman.\n\n"
+        "Men sizning kunlik rejangiz va namoz vaqtlarini eslatib turaman.\n"
+        "Har kuni ertalab soat 06:30 da kunlik xulosani avtomatik yuboraman.\n\n"
         "Buyruqlar:\n"
         "/bugun — bugungi rejani ko'rish\n"
         "/namoz — bugungi namoz vaqtlari\n"
@@ -312,10 +313,17 @@ async def cmd_start(message: Message):
     )
 
 
-@dp.message(Command("bugun"))
-async def cmd_today(message: Message):
-    weekday = datetime.now(TZ).weekday()
-    today_str = datetime.now(TZ).date().isoformat()
+async def build_today_summary() -> str:
+    """
+    Bugungi kun uchun to'liq xulosani tayyorlaydi: standart reja + namoz
+    vaqtlari + foydalanuvchi qo'shgan maxsus eslatmalar, barchasi vaqt
+    bo'yicha tartiblangan holda. /bugun buyrug'i va ertalabki avtomatik
+    xabar ikkalasi ham shundan foydalanadi.
+    """
+    now = datetime.now(TZ)
+    weekday = now.weekday()
+    today = now.date()
+    today_str = today.isoformat()
     plan = WEEKLY_PLAN.get(weekday)
     name = WEEKDAY_NAMES_UZ[weekday]
 
@@ -325,6 +333,13 @@ async def cmd_today(message: Message):
         for item in plan["tasks"]:
             all_items.append((item["time"], item["label"]))
 
+    try:
+        prayers = await fetch_prayer_times(CITY, COUNTRY, today)
+        for prayer_name, time_str in prayers.items():
+            all_items.append((time_str, f"{prayer_name} namozi"))
+    except Exception as e:
+        logger.error(f"Namoz vaqtlarini olishda xatolik: {e}")
+
     for item in custom_reminders.get_for_daily_and_weekly(weekday):
         all_items.append((item["time"], f"{item['text']} (maxsus)"))
 
@@ -332,14 +347,27 @@ async def cmd_today(message: Message):
         all_items.append((item["time"], f"{item['text']} (maxsus, bugun)"))
 
     if not all_items:
-        await message.answer(f"<b>{name}</b> uchun reja topilmadi.")
-        return
+        return f"<b>{name}</b> uchun reja topilmadi."
 
     all_items.sort(key=lambda x: x[0])
     lines = [f"<b>{name} kuni rejasi:</b>\n"]
     for time_str, label in all_items:
         lines.append(f"🕒 {time_str} — {html.escape(label)}")
-    await message.answer("\n".join(lines))
+    return "\n".join(lines)
+
+
+@dp.message(Command("bugun"))
+async def cmd_today(message: Message):
+    summary = await build_today_summary()
+    await message.answer(summary)
+
+
+async def send_morning_summary():
+    summary = await build_today_summary()
+    try:
+        await bot.send_message(CHAT_ID, f"🌅 <b>Xayrli tong!</b>\n\n{summary}")
+    except Exception as e:
+        logger.error(f"Ertalabki xulosani yuborishda xatolik: {e}")
 
 
 @dp.message(Command("namoz"))
@@ -557,6 +585,13 @@ async def main():
         schedule_today_reminders,
         trigger=CronTrigger(hour=0, minute=5),
         id="daily_scheduler",
+        replace_existing=True,
+    )
+    # Har kuni 06:30 da kunlik xulosani yuborish
+    scheduler.add_job(
+        send_morning_summary,
+        trigger=CronTrigger(hour=6, minute=30),
+        id="morning_summary",
         replace_existing=True,
     )
     scheduler.start()

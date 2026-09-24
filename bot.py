@@ -23,7 +23,9 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    TelegramObject,
 )
+from aiogram import BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -50,6 +52,28 @@ dp = Dispatcher(storage=MemoryStorage())
 scheduler = AsyncIOScheduler(timezone=TZ)
 storage = Storage("data.json")
 custom_reminders = CustomReminders("custom_reminders.json")
+
+
+class OwnerOnlyMiddleware(BaseMiddleware):
+    """
+    Faqat CHAT_ID egasidan kelgan xabar/callback'larni handlerlarga o'tkazadi.
+    Boshqa har qanday foydalanuvchidan kelgan update jimgina e'tiborsiz
+    qoldiriladi — hech qanday javob, hech qanday buyruq bajarilmaydi.
+    """
+
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        user = data.get("event_from_user")
+        if user is None or user.id != CHAT_ID:
+            logger.warning(
+                f"Ruxsatsiz foydalanuvchidan urinish: id={getattr(user, 'id', None)}, "
+                f"username={getattr(user, 'username', None)}"
+            )
+            return  # handlerga umuman o'tkazilmaydi
+        return await handler(event, data)
+
+
+dp.message.middleware(OwnerOnlyMiddleware())
+dp.callback_query.middleware(OwnerOnlyMiddleware())
 
 WEEKDAY_NAMES_UZ = {
     0: "Dushanba",

@@ -55,6 +55,17 @@ Termux'da fon rejimida ishlashi uchun:
 - `/namoz` — bugungi namoz vaqtlari
 - `/statistika` — oxirgi 7 kunlik bajarish foizi
 - `/shahar <nom>` — namoz vaqtlari hisoblanadigan shaharni o'zgartirish
+- `/qoshish` — yangi eslatma qo'shish (bosqichma-bosqich so'raydi):
+  - **Har kuni** — masalan har kuni soat 22:00 da
+  - **Haftalik** — masalan har dushanba soat 18:00 da
+  - **Aniq sana** — masalan faqat 2026-10-05 kuni soat 09:00 da (bir marta ishlaydi, keyin avtomatik o'chadi)
+- `/royxat` — qo'shilgan barcha maxsus eslatmalar ro'yxati (ID raqamlari bilan)
+- `/ochirish <ID>` — masalan `/ochirish 3` — o'sha eslatmani butunlay o'chiradi
+- `/bekor` — `/qoshish` jarayonini bekor qilish
+
+Maxsus eslatmalar `custom_reminders.json` faylida saqlanadi va `schedule_data.py`
+dagi asosiy haftalik reja bilan bir qatorda, mustaqil ishlaydi — birini
+o'zgartirish ikkinchisiga ta'sir qilmaydi.
 
 ## Rejani o'zgartirish
 

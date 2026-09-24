@@ -236,6 +236,39 @@ async def fire_once_reminder(text: str, item_id: str, reminder_id: int):
     custom_reminders.remove_once_after_fire(reminder_id)
 
 
+def schedule_single_custom(reminder_id: int, time_str: str, text: str, once: bool):
+    """
+    Yangi qo'shilgan maxsus eslatma bugungi kunga tegishli bo'lsa, uni
+    kutib o'tirmasdan darhol schedulerga qo'shadi (agar vaqti hali o'tmagan bo'lsa).
+    """
+    today = datetime.now(TZ).date()
+    hh, mm = map(int, time_str.split(":"))
+    run_time = datetime.now(TZ).replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if run_time < datetime.now(TZ):
+        return  # vaqti allaqachon o'tgan, bugun uchun eslatma yubormaymiz
+
+    if once:
+        item_id = f"{today.isoformat()}_once_{reminder_id}"
+        scheduler.add_job(
+            fire_once_reminder,
+            trigger="date",
+            run_date=run_time,
+            args=[f"📅 <b>{html.escape(text)}</b>", item_id, reminder_id],
+            id=f"job_{item_id}",
+            replace_existing=True,
+        )
+    else:
+        item_id = f"{today.isoformat()}_custom_{reminder_id}"
+        scheduler.add_job(
+            send_reminder,
+            trigger="date",
+            run_date=run_time,
+            args=[f"⏰ <b>{html.escape(text)}</b>", item_id],
+            id=f"job_{item_id}",
+            replace_existing=True,
+        )
+
+
 # --- Buyruqlar ---
 
 @dp.message(CommandStart())
@@ -258,14 +291,30 @@ async def cmd_start(message: Message):
 @dp.message(Command("bugun"))
 async def cmd_today(message: Message):
     weekday = datetime.now(TZ).weekday()
+    today_str = datetime.now(TZ).date().isoformat()
     plan = WEEKLY_PLAN.get(weekday)
     name = WEEKDAY_NAMES_UZ[weekday]
-    if not plan or not plan.get("tasks"):
+
+    all_items = []  # (vaqt, matn) juftliklari, keyin vaqt bo'yicha saralanadi
+
+    if plan and plan.get("tasks"):
+        for item in plan["tasks"]:
+            all_items.append((item["time"], item["label"]))
+
+    for item in custom_reminders.get_for_daily_and_weekly(weekday):
+        all_items.append((item["time"], f"{item['text']} (maxsus)"))
+
+    for item in custom_reminders.get_for_date(today_str):
+        all_items.append((item["time"], f"{item['text']} (maxsus, bugun)"))
+
+    if not all_items:
         await message.answer(f"<b>{name}</b> uchun reja topilmadi.")
         return
+
+    all_items.sort(key=lambda x: x[0])
     lines = [f"<b>{name} kuni rejasi:</b>\n"]
-    for item in plan["tasks"]:
-        lines.append(f"🕒 {item['time']} — {item['label']}")
+    for time_str, label in all_items:
+        lines.append(f"🕒 {time_str} — {html.escape(label)}")
     await message.answer("\n".join(lines))
 
 
@@ -407,14 +456,19 @@ async def process_text(message: Message, state: FSMContext):
     if rtype == "daily":
         rid = custom_reminders.add_daily(time_str, text)
         desc = f"Har kuni soat {time_str} da"
+        schedule_single_custom(rid, time_str, text, once=False)
     elif rtype == "weekly":
         weekday = data["weekday"]
         rid = custom_reminders.add_weekly(weekday, time_str, text)
         desc = f"Har {WEEKDAY_NAMES_UZ[weekday]} kuni soat {time_str} da"
+        if weekday == datetime.now(TZ).weekday():
+            schedule_single_custom(rid, time_str, text, once=False)
     else:  # once
         date_str = data["date"]
         rid = custom_reminders.add_once(date_str, time_str, text)
         desc = f"{date_str} kuni soat {time_str} da (bir marta)"
+        if date_str == datetime.now(TZ).date().isoformat():
+            schedule_single_custom(rid, time_str, text, once=True)
 
     await state.clear()
     await message.answer(

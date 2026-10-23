@@ -1,78 +1,79 @@
 """
-RejaliBot 2.0: ball tizimi.
-
-Qoidalar (spetsifikatsiyadan):
-  - Ball yig'iladi, kamaymaydi. Haftalik maqsad (219) yo'q, faqat solishtirish.
-  - Har bir eslatmaning ball qiymati QO'LDA belgilanadi (reminders.points),
-    ustuvorlik darajasidan mustaqil. Ustuvorlik (1/2/3) faqat ko'rsatish uchun.
-  - Faqat scored=1 bo'lgan eslatmalar ball beradi.
-  - Vaqtida yoki kech bajarilsa to'liq ball qo'shiladi (kechikish faqat
-    timerda ko'rinadi, jarima yo'q).
-  - Bajarilmasa ball qo'shilmaydi.
-  - Kechiktirilgan (boshqa kunga surilgan) vazifa keyinroq bajarilsa,
-    yarim ball oladi.
-  - Qazo va sub-tasklar ball bermaydi.
+Ball tizimi. Ball yig'iladi, kamaymaydi. Har eslatmaning balli qo'lda belgilanadi.
+Vaqtida yoki kech bajarilsa to'liq ball (kechikish faqat timerda ko'rinadi).
+Kechiktirilib keyin bajarilsa yarim ball. Qazo va sub-task ball bermaydi.
+Ixtiyoriy (optional) eslatmalar foiz hisobiga kirmaydi, bajarilsa faqat ball (bonus) beradi.
 """
 
 from datetime import date, timedelta
 
+import app
 import db
 
-POSTPONED_FACTOR = 0.5  # kechiktirilib keyin bajarilganda ballning yarmi
+POSTPONED_FACTOR = 0.5
 PRIORITY_NAMES = {1: "oddiy", 2: "muhim", 3: "juda muhim"}
 PRIORITY_ICON = {1: "", 2: "❗", 3: "🔥"}
 
 
-def week_bounds(d: date) -> tuple[date, date]:
-    """Dushanbadan yakshanbagacha."""
+def week_bounds(d: date):
     monday = d - timedelta(days=d.weekday())
     return monday, monday + timedelta(days=6)
 
 
-def award_points(occurrence_id: int, base_points: int, was_postponed: bool = False) -> int:
-    """Bajarilgan eslatma uchun ball beradi."""
-    pts = int(base_points * POSTPONED_FACTOR) if was_postponed else base_points
-    with db.connect() as conn:
-        conn.execute("UPDATE occurrences SET points = ? WHERE id = ?", (pts, occurrence_id))
+def award_points(occ_id: int, base: int, was_postponed: bool = False) -> int:
+    pts = int(base * POSTPONED_FACTOR) if was_postponed else base
+    db.ex("UPDATE occurrences SET points = ? WHERE id = ?", (pts, occ_id))
     return pts
 
 
+def _summary(rows: list[dict]) -> dict:
+    required = [r for r in rows if not r["is_optional"]]
+    done = sum(1 for r in required if r["status"] == "done")
+    bonus = sum(1 for r in rows if r["is_optional"] and r["status"] == "done")
+    total = len(required)
+    return {
+        "points": sum(r["points"] for r in rows),
+        "done": done, "total": total, "bonus": bonus,
+        "percent": round(done / total * 100) if total else 0,
+    }
+
+
+def _range_rows(first: date, last: date) -> list[dict]:
+    """Faqat vaqti kelgan (yoki allaqachon bajarilgan) eslatmalar hisoblanadi: kun davomida foiz sun'iy pasaymasin."""
+    return db.q(
+        "SELECT status, points, is_optional FROM occurrences "
+        "WHERE date BETWEEN ? AND ? AND is_subtask = 0 AND scored = 1 "
+        "AND (scheduled_at <= ? OR status = 'done')",
+        (first.isoformat(), last.isoformat(), app.now().isoformat()),
+    )
+
+
 def week_summary(monday: date) -> dict:
-    """Bir hafta uchun: ball, bajarilgan/jami (ballli eslatmalar bo'yicha)."""
-    sunday = monday + timedelta(days=6)
-    with db.connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT status, points, scored FROM occurrences
-            WHERE date BETWEEN ? AND ? AND is_subtask = 0 AND scored = 1
-            """,
-            (monday.isoformat(), sunday.isoformat()),
-        ).fetchall()
-    total = len(rows)
-    done = sum(1 for r in rows if r["status"] == "done")
-    points = sum(r["points"] for r in rows)
-    percent = round(done / total * 100) if total else 0
-    return {"monday": monday, "points": points, "done": done, "total": total, "percent": percent}
+    s = _summary(_range_rows(monday, monday + timedelta(days=6)))
+    s["monday"] = monday
+    return s
+
+
+def day_summary(d: date) -> dict:
+    return _summary(_range_rows(d, d))
+
+
+def month_summary(year: int, month: int) -> dict:
+    first = date(year, month, 1)
+    nxt = date(year + month // 12, month % 12 + 1, 1)
+    return _summary(_range_rows(first, nxt - timedelta(days=1)))
 
 
 def weekly_history(weeks: int, today: date) -> list[dict]:
     monday, _ = week_bounds(today)
-    history = []
-    for i in range(weeks):
-        m = monday - timedelta(weeks=i)
-        history.append(week_summary(m))
-    return history
+    return [week_summary(monday - timedelta(weeks=i)) for i in range(weeks)]
 
 
-def record_week() -> dict | None:
-    """Barcha davrdagi eng yaxshi hafta (ball bo'yicha)."""
-    with db.connect() as conn:
-        first = conn.execute("SELECT MIN(date) AS d FROM occurrences").fetchone()
+def record_week(today: date):
+    first = db.q1("SELECT MIN(date) AS d FROM occurrences")
     if not first or not first["d"]:
         return None
-    start = date.fromisoformat(first["d"])
-    monday, _ = week_bounds(start)
-    today = date.today()
+    monday, _ = week_bounds(date.fromisoformat(first["d"]))
     best = None
     while monday <= today:
         s = week_summary(monday)
@@ -82,26 +83,7 @@ def record_week() -> dict | None:
     return best
 
 
-def month_summary(year: int, month: int) -> dict:
-    first = date(year, month, 1)
-    nxt = date(year + (month // 12), (month % 12) + 1, 1)
-    last = nxt - timedelta(days=1)
-    with db.connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT status, points FROM occurrences
-            WHERE date BETWEEN ? AND ? AND is_subtask = 0 AND scored = 1
-            """,
-            (first.isoformat(), last.isoformat()),
-        ).fetchall()
-    total = len(rows)
-    done = sum(1 for r in rows if r["status"] == "done")
-    points = sum(r["points"] for r in rows)
-    percent = round(done / total * 100) if total else 0
-    return {"year": year, "month": month, "points": points, "done": done, "total": total, "percent": percent}
-
-
-def format_delta(current: int, previous: int) -> str:
+def delta_text(current: int, previous: int) -> str:
     diff = current - previous
     if diff > 0:
         return f"▲ +{diff}"

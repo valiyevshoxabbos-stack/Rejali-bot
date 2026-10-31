@@ -13,16 +13,23 @@ import db
 QAZO_GRACE_MINUTES = 15
 
 PRAYER_SLUGS = {"Bomdod": "bomdod", "Peshin": "peshin", "Asr": "asr", "Shom": "shom", "Xufton": "xufton"}
-CODE_RE = re.compile(r"^/?(bomdod|peshin|asr|shom|xufton)_(\d{2})_(\d{2})$")
+CODE_RE = re.compile(r"^/?(bomdod|peshin|asr|shom|xufton)_(\d{2})_(\d{2})(?:_(\d{4}))?$", re.IGNORECASE)
 
 
 def make_code(prayer: str, d: date) -> str:
-    return f"{PRAYER_SLUGS[prayer]}_{d.day:02d}_{d.month:02d}"
+    base = f"{PRAYER_SLUGS[prayer]}_{d.day:02d}_{d.month:02d}"
+    # Agar o'tgan yildan xuddi shu kodli OCHIQ qazo qolib ketgan bo'lsa, yilni qo'shamiz;
+    # aks holda (yopilgan bo'lsa ham) odatiy qisqa kod ishlatiladi.
+    clash = db.q1("SELECT id FROM qazo WHERE code = ? AND status = 'open' AND date != ?", (base, d.isoformat()))
+    return f"{base}_{d.year}" if clash else base
 
 
 def parse_code(text: str):
     m = CODE_RE.match(text.strip().lower())
-    return (m.group(1), int(m.group(2)), int(m.group(3))) if m else None
+    if not m:
+        return None
+    year = int(m.group(4)) if m.group(4) else None
+    return (m.group(1), int(m.group(2)), int(m.group(3)), year)
 
 
 def qazo_deadline(idx: int, prayer_times: list[datetime], next_day_fajr: datetime | None):
@@ -31,9 +38,9 @@ def qazo_deadline(idx: int, prayer_times: list[datetime], next_day_fajr: datetim
 
 
 def create_qazo(occurrence_id: int, prayer: str, d: date, now_iso: str):
-    code = make_code(prayer, d)
-    if db.q1("SELECT id FROM qazo WHERE code = ?", (code,)):
+    if db.q1("SELECT id FROM qazo WHERE occurrence_id = ?", (occurrence_id,)):
         return None
+    code = make_code(prayer, d)
     db.ins(
         "INSERT INTO qazo (occurrence_id, code, title, date, status, created_at) VALUES (?,?,?,?, 'open', ?)",
         (occurrence_id, code, f"{prayer} namozi", d.isoformat(), now_iso),
@@ -43,8 +50,8 @@ def create_qazo(occurrence_id: int, prayer: str, d: date, now_iso: str):
 
 
 def mark_qazo_done(code: str, now_iso: str) -> bool:
-    row = db.q1("SELECT id, occurrence_id, status FROM qazo WHERE code = ?", (code,))
-    if not row or row["status"] == "done":
+    row = db.q1("SELECT id, occurrence_id FROM qazo WHERE code = ? AND status = 'open' ORDER BY date, id", (code,))
+    if not row:
         return False
     db.ex("UPDATE qazo SET status = 'done', done_at = ? WHERE id = ?", (now_iso, row["id"]))
     db.ex("UPDATE occurrences SET status = 'qazo_done' WHERE id = ?", (row["occurrence_id"],))

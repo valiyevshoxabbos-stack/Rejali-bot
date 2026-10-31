@@ -1,34 +1,21 @@
-# AltronBek 3.0
+# AltronBek 3.0.1
 
-## GitHub'ga yuklash (kompyuterdan)
-1. Zip'ni oching.
-2. GitHub repo'da **Add file → Upload files**. Hamma fayllarni va **`features`** papkasini
-   sudrab tashlang (papka tuzilmasi saqlanadi). Bir xil nomli fayllar (`bot.py`, `db.py`, `services.py`,
-   `scoring.py`, `qazo.py`, `schedule_data.py`) yangisi bilan almashadi. **Commit changes**.
-3. Railway o'zi qayta deploy qiladi. Start command `python bot.py` bo'lib qolaversa ham bo'ladi
-   (`bot.py` endi `main.py` ni ishga tushiradi). Variables o'zgarmaydi.
-4. Eski `storage.py` va `custom_reminders.py` (1.0 dan) endi kerak emas, o'chirsangiz bo'ladi.
+## Yangilash tartibi (3.0 → 3.0.1, ma'lumotlarni saqlagan holda)
+1. Telegramda botga kiring: **⚙️ Sozlamalar → 🗂 Ma'lumotlar → 📤 Zaxira nusxa** ni bosing va `.db` faylni saqlab oling.
+2. GitHub repo'da **Add file → Upload files** ni oching.
+3. Shu papkadagi **barcha fayllarni** (`bot.py`, `main.py`, `app.py`, `db.py`, `feat_*.py` va boshqalar — hammasi yassi, papkasiz!) tanlab yuklang va **Commit changes** ni bosing.
+   *(Repo'da eski `features/` papkasi qolsa ham zarari yo'q, yangi `main.py` faqat `feat_*.py` modullarini o'qiydi).*
+4. Railway avtomatik qayta deploy qiladi (`python bot.py`).
+5. Bot ishga tushganda:
+   - Avval bazaning yangilanishdan oldingi avtomatik nusxasini (`altronbek.db.pre-v2.bak`) yuboradi;
+   - Keyin **"🟢 AltronBek 3.0.1 ishga tushdi."** xabarini yuboradi.
+6. `/holat` buyrug'ini yuborib baza yo'li (`/data/altronbek.db`), sxema (`v2`) va yozuvlar soni (tug'ilgan kunlar va h.k.) joyida ekanini tekshiring.
 
-Birinchi ishga tushishda bot "🟢 AltronBek 3.0 ishga tushdi" xabarini yuboradi. 2.0 dagi eski
-xabarlarning tugmalari "oldingi versiyadan qolgan" deb rad etiladi (boshqa yozuvni buzmaslik uchun).
-Eski 2.0 bazasi bo'lsa, `.v2.bak` nomi bilan chetga olinadi.
-
-## Volume
-Volume ulanmaguncha baza har deploy'da noldan boshlanadi. Ulagach (mount path `/data`)
-Variables'ga `DB_PATH=/data/altronbek.db` qo'shing. Zaxira: Sozlamalar → Ma'lumotlar.
-
-## Tuzilma
-- `main.py` kirish nuqtasi; `features/` har funksiya alohida modul.
-- Ixtiyoriy modullar (`features/weather.py`, `features/calculator.py`) fayl qo'shilsa avtomatik yuklanadi;
-  yo'q bo'lsa menyu "keyingi versiyada" deb javob beradi.
-- Baza versiyalangan (`PRAGMA user_version`): keyingi versiyalar ma'lumotni saqlab yangilanadi.
-
-## 3.0 da bor
-Menyu va sozlamalar, xabarlarni tozalash (🗑, avto-o'chirish, tiklash), eslatma rejimlari
-(majburiy/ixtiyoriy/o'chirilgan), pauza, tezkor "➕ Bajardim", uyqu, tug'ilgan kunlar, vazn,
-bo'limli statistika, zaxira va CSV eksport, `/holat`.
-Keyingi versiyalarda: ob-havo (3.1), kalkulyator (3.2).
-
-## Eslatma
-`/vaqt zal 10:00 doimiy` faqat shu kun turi uchun (masalan juma kuni yozsangiz, juma uchun) doimiy o'zgartiradi.
-Juma kuni fizika standart 15:30 ga surilgan (zal bilan to'qnashmasligi uchun).
+## 3.0.1 dagi yangiliklar va tuzatishlar
+- **Yassi tuzilma (`feat_*.py`):** GitHub'ga papkasiz bitta urinishda yuklash.
+- **Laglar bartaraf etildi:** SQLite `WAL` rejimi + doimiy ulanish, tezkor `cb.answer()`, yengillashtirilgan qazo tekshiruvi.
+- **Kunlik jurnal (`feat_journal.py`):** javob berilgan eslatma xabarlari o'chib, kun bo'yi bitta xabar yangilanib boradi.
+- **Zaxiradan tiklash (`/tiklash`, `feat_restore.py`):** `.db` fayldan xavfsiz tekshiruv va avto-nusxa bilan tiklash.
+- **Foydalanuvchi xabarini ham o'chirish:** bot javobi o'chganda siz yozgan buyruq ham tozalanadi (Sozlamalarda o'chirib-yoqish mumkin).
+- **Uyqu:** Bomdodda uyg'onish qayta so'ralmaydi; `/uyqu_kiritish` orqali tungi uyquni qo'lda kiritish qo'shildi.
+- **Tuzatishlar:** eslatma xabarida izoh (`note`) chiqadi; ko'p yillik qazo kodlari to'qnashmaydi; `/shahar` va `/sinf` bugungi jadvalni darhol yangilaydi; ixtiyoriy eslatmada "Boraman" bosilgach vaqtida eslatadi; `/izohlar` ro'yxati hamda kengaytirilgan CSV/matn eksporti qo'shildi.

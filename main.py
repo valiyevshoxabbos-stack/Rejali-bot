@@ -1,17 +1,17 @@
 """
-AltronBek 3.0: kirish nuqtasi.
+AltronBek 3.0.1: kirish nuqtasi (yassi tuzilma: feat_*.py).
 
-Funksiyalar alohida modullar (features/). Asosiy modullar majburiy: yo'q bo'lsa bot
-ishga tushmaydi (xato darhol ko'rinadi). Ixtiyoriy modullar (weather, calculator ...)
-yo'q bo'lsa, menyu "keyingi versiyada" deb javob beradi.
+Asosiy modullar majburiy: yo'q bo'lsa bot ishga tushmaydi (xato darhol ko'rinadi).
+Ixtiyoriy modullar (feat_weather, feat_calculator ...) yo'q bo'lsa, menyu "keyingi versiyada" deb javob beradi.
 """
 
 import asyncio
 import importlib
+import os
 from datetime import datetime
 
 from aiogram import BaseMiddleware
-from aiogram.types import BotCommand, ErrorEvent
+from aiogram.types import BotCommand, ErrorEvent, FSInputFile
 
 import app
 import db
@@ -19,21 +19,35 @@ import jobs
 import messenger
 import services as sv
 
-CORE = ["menu", "reminders", "qazo_feature", "sleep", "birthdays", "weight", "stats",
-        "settings", "cleanup", "summary", "status"]
+CORE = [
+    "menu", "reminders", "qazo", "sleep", "birthdays", "weight",
+    "stats", "settings", "cleanup", "summary", "status", "restore",
+]
 OPTIONAL = ["weather", "calculator"]
 
-COMMANDS = [("bugun", "Bugungi reja"), ("qoshish", "Yangi eslatma"), ("royxat", "Maxsus eslatmalar"),
-            ("qazolar", "Ochiq qazolar"), ("statistika", "Statistika"), ("vazn", "Vazn kiritish"),
-            ("uyqu", "Uyqu"), ("tkunlar", "Tug'ilgan kunlar"), ("sozlamalar", "Sozlamalar"),
-            ("holat", "Bot holati"), ("bekor", "Jarayonni bekor qilish")]
+COMMANDS = [
+    ("bugun", "Bugungi reja"),
+    ("qoshish", "Yangi eslatma"),
+    ("royxat", "Maxsus eslatmalar"),
+    ("qazolar", "Ochiq qazolar"),
+    ("statistika", "Statistika"),
+    ("vazn", "Vazn kiritish"),
+    ("uyqu", "Uyqu"),
+    ("uyqu_kiritish", "Uyquni qo'lda kiritish"),
+    ("tkunlar", "Tug'ilgan kunlar"),
+    ("izohlar", "Saqlangan izohlar"),
+    ("tiklash", "Zaxiradan tiklash"),
+    ("sozlamalar", "Sozlamalar"),
+    ("holat", "Bot holati"),
+    ("bekor", "Jarayonni bekor qilish"),
+]
 
 
 class OwnerOnly(BaseMiddleware):
     """
     1) Faqat CHAT_ID egasidan kelgan update'lar o'tadi; begonalarniki jimgina tashlab yuboriladi.
-    2) Baza yaratilishidan oldin yuborilgan xabarlarning tugmalari rad etiladi: oldingi versiya
-       (2.0) dan qolgan eski tugma yangi bazadagi boshqa yozuvni belgilab yubormasligi uchun.
+    2) `epoch` dan oldin yuborilgan xabarlarning tugmalari rad etiladi (eski versiya yoki tiklashdan oldingi xabar).
+    3) Foydalanuvchi matnli xabari id si `messenger.current_trigger` contextvar'ga yoziladi.
     """
 
     async def __call__(self, handler, event, data):
@@ -45,12 +59,18 @@ class OwnerOnly(BaseMiddleware):
         if cb is not None and self._is_stale(cb):
             try:
                 await app.bot.answer_callback_query(
-                    cb.id, text="Bu xabar oldingi versiyadan qolgan, tugmalari ishlamaydi. Menyudan foydalaning.",
+                    cb.id, text="Bu xabar oldingi baza/versiyadan qolgan, tugmalari ishlamaydi. Menyudan foydalaning.",
                     show_alert=True)
             except Exception as e:
                 app.log.warning(f"Eski tugmaga javob berib bo'lmadi: {e}")
             return None
-        return await handler(event, data)
+        msg = getattr(event, "message", None)
+        trig_id = msg.message_id if (msg is not None and getattr(msg, "document", None) is None) else None
+        token = messenger.current_trigger.set(trig_id)
+        try:
+            return await handler(event, data)
+        finally:
+            messenger.current_trigger.reset(token)
 
     @staticmethod
     def _is_stale(cb) -> bool:
@@ -66,13 +86,14 @@ class OwnerOnly(BaseMiddleware):
 def load_features() -> list:
     loaded = []
     for name in CORE:
-        loaded.append(importlib.import_module(f"features.{name}"))
+        loaded.append(importlib.import_module(f"feat_{name}"))
     for name in OPTIONAL:
+        mod_name = f"feat_{name}"
         try:
-            mod = importlib.import_module(f"features.{name}")
+            mod = importlib.import_module(mod_name)
         except ModuleNotFoundError as e:
-            if e.name != f"features.{name}":
-                raise  # modul bor, lekin ichidagi import xato: yashirmaymiz
+            if e.name != mod_name:
+                raise
             continue
         app.OPTIONAL[name] = mod
         loaded.append(mod)
@@ -89,17 +110,32 @@ def setup():
 
     features = load_features()
     for mod in features:
-        app.dp.include_router(mod.router)
+        if hasattr(mod, "router"):
+            app.dp.include_router(mod.router)
     for mod in features + [jobs]:
         if hasattr(mod, "register_jobs"):
             mod.register_jobs(app.scheduler)
     return features
 
 
+async def _send_migration_backups(backups: list[str]):
+    for bak in backups:
+        if not os.path.exists(bak):
+            continue
+        try:
+            await app.bot.send_document(
+                app.CHAT_ID,
+                FSInputFile(bak, filename=os.path.basename(bak)),
+                caption=f"🛡 Baza yangilanishidan oldingi avtomatik zaxira ({os.path.basename(bak)})",
+            )
+        except Exception as e:
+            app.log.error(f"Migratsiya zaxirasini yuborishda xatolik: {e}")
+
+
 async def amain():
-    db.init_db()
+    backups = db.init_db()
     if db.get_setting("epoch") is None:
-        db.set_setting("epoch", datetime.now(app.TZ).replace(microsecond=0).isoformat())  # shu paytdan oldingi xabar tugmalari ishlamaydi
+        db.set_setting("epoch", app.now().replace(microsecond=0).isoformat())
     sv.seed_standard_reminders()
     setup()
     app.scheduler.start()
@@ -108,8 +144,10 @@ async def amain():
         await app.bot.set_my_commands([BotCommand(command=c, description=d) for c, d in COMMANDS])
     except Exception as e:
         app.log.warning(f"Buyruqlar ro'yxatini o'rnatib bo'lmadi: {e}")
-    from features import status
-    await status.startup_message()
+    if backups:
+        await _send_migration_backups(backups)
+    import feat_status
+    await feat_status.startup_message()
     await app.dp.start_polling(app.bot)
 
 

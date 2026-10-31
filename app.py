@@ -1,5 +1,5 @@
 """
-AltronBek 3.0: umumiy ob'ektlar (bot, dispatcher, scheduler) va yordamchilar.
+AltronBek 3.0.1: umumiy ob'ektlar (bot, dispatcher, scheduler) va yordamchilar.
 Barcha modullar shu faylni `import app` qilib ishlatadi (vaqt uchun app.now()).
 """
 
@@ -19,7 +19,7 @@ from aiogram.enums import ParseMode  # noqa: E402
 from aiogram.fsm.storage.memory import MemoryStorage  # noqa: E402
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # noqa: E402
 
-VERSION = "3.0"
+VERSION = "3.0.1"
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = int(os.environ["CHAT_ID"])

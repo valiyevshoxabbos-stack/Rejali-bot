@@ -1,4 +1,4 @@
-"""AltronBek 3.0: biznes mantiq (Telegramga bog'liq emas, shuning uchun sinash oson)."""
+"""AltronBek 3.0.1: biznes mantiq (Telegramga bog'liq emas, shuning uchun sinash oson)."""
 
 import os
 from datetime import date, datetime, timedelta
@@ -133,6 +133,18 @@ def reminders_for_day(d: date) -> list[dict]:
     return result
 
 
+def disabled_for_day(d: date) -> list[dict]:
+    """Shu kun uchun vaqtincha o'chirilgan (off) eslatmalar (jurnalda ko'rsatish uchun)."""
+    if pause_active(d):
+        return []
+    rows = db.q(
+        "SELECT * FROM reminders WHERE active = 1 AND mode = 'off' AND (kind = 'daily' "
+        "OR (kind = 'weekly' AND weekday = ?) OR (kind = 'once' AND date = ?))",
+        (d.weekday(), d.isoformat()),
+    )
+    return [r for r in rows if effective_mode(r, d) == "off"]
+
+
 def resume_expired_off() -> list[str]:
     """Muddati o'tgan 'o'chirilgan' eslatmalarni qayta yoqadi. Nomlar ro'yxatini qaytaradi."""
     rows = db.q(
@@ -150,13 +162,15 @@ def resume_expired_off() -> list[str]:
 
 def ensure_occurrence(reminder: dict, d: date) -> int:
     scheduled = app.at(d, reminder["start"]).isoformat()
+    optional = 1 if reminder.get("eff_mode", reminder.get("mode")) == "optional" else 0
     row = db.q1(
-        "SELECT id FROM occurrences WHERE reminder_id = ? AND date = ? AND scheduled_at = ? AND prayer IS NULL",
+        "SELECT id, status, is_optional FROM occurrences WHERE reminder_id = ? AND date = ? AND scheduled_at = ? AND prayer IS NULL",
         (reminder["id"], d.isoformat(), scheduled),
     )
     if row:
+        if row["status"] == "pending" and row["is_optional"] != optional:
+            db.ex("UPDATE occurrences SET is_optional = ? WHERE id = ?", (optional, row["id"]))
         return row["id"]
-    optional = 1 if reminder.get("eff_mode", reminder.get("mode")) == "optional" else 0
     return db.ins(
         "INSERT INTO occurrences (reminder_id, date, scheduled_at, title, scored, is_optional) VALUES (?,?,?,?,?,?)",
         (reminder["id"], d.isoformat(), scheduled, reminder["title"], reminder["scored"], optional),
@@ -164,12 +178,15 @@ def ensure_occurrence(reminder: dict, d: date) -> int:
 
 
 def ensure_prayer_occurrence(prayer: str, d: date, hhmm: str) -> int:
-    row = db.q1("SELECT id FROM occurrences WHERE prayer = ? AND date = ?", (prayer, d.isoformat()))
+    scheduled = app.at(d, hhmm).isoformat()
+    row = db.q1("SELECT id, status, scheduled_at FROM occurrences WHERE prayer = ? AND date = ?", (prayer, d.isoformat()))
     if row:
+        if row["status"] == "pending" and row["scheduled_at"] != scheduled:
+            db.ex("UPDATE occurrences SET scheduled_at = ? WHERE id = ?", (scheduled, row["id"]))
         return row["id"]
     return db.ins(
         "INSERT INTO occurrences (prayer, date, scheduled_at, title, scored) VALUES (?,?,?,?,0)",
-        (prayer, d.isoformat(), app.at(d, hhmm).isoformat(), f"{prayer} namozi"),
+        (prayer, d.isoformat(), scheduled, f"{prayer} namozi"),
     )
 
 
@@ -196,7 +213,7 @@ def get_points(occ: dict) -> int:
 
 
 def mark_done(occ_id: int) -> dict:
-    """Bajarildi. Kechikish faqat ma'lumot (jarima yo'q). {'late_minutes','points','was_postponed'}"""
+    """Bajarildi. Kechikish faqat ma'lumot (jarima yo'q). {'late_minutes','points','was_postponed','date'}"""
     occ = get_occurrence(occ_id)
     if occ is None:
         return {"error": "topilmadi"}
@@ -210,7 +227,7 @@ def mark_done(occ_id: int) -> dict:
     points = 0
     if occ["scored"] and not occ["is_subtask"]:
         points = scoring.award_points(occ_id, get_points(occ), was_postponed)
-    return {"late_minutes": late, "points": points, "was_postponed": was_postponed}
+    return {"late_minutes": late, "points": points, "was_postponed": was_postponed, "date": occ["date"]}
 
 
 def mark_skipped(occ_id: int) -> bool:
@@ -287,11 +304,27 @@ def quick_log(reminder_id: int) -> dict:
 
 # ------------------------------------------------------------------ qazo avtomatik aniqlash
 
+def has_pending_past_prayers(current: datetime) -> bool:
+    """Tezkor tekshiruv: kutilayotgan namoz bo'lmasa HTTP va thread ochilmaydi."""
+    d0 = current.date().isoformat()
+    d1 = (current.date() - timedelta(days=1)).isoformat()
+    row = db.q1(
+        "SELECT 1 FROM occurrences WHERE prayer IS NOT NULL AND date IN (?, ?) "
+        "AND status = 'pending' AND scheduled_at <= ? LIMIT 1",
+        (d0, d1, current.isoformat()),
+    )
+    return row is not None
+
+
 def find_new_qazo(current: datetime, city: str, country: str) -> list[dict]:
     """Muddati o'tgan, belgilanmagan namozlar uchun qazo yaratadi (bloklovchi: thread'da chaqiring)."""
     created = []
     for offset in (0, -1):
         d = (current + timedelta(days=offset)).date()
+        rows = db.q("SELECT id, prayer, status FROM occurrences WHERE prayer IS NOT NULL AND date = ? AND status = 'pending'",
+                    (d.isoformat(),))
+        if not rows:
+            continue
         try:
             today_t = fetch_prayer_times(city, country, d)
             next_t = fetch_prayer_times(city, country, d + timedelta(days=1))
@@ -299,11 +332,7 @@ def find_new_qazo(current: datetime, city: str, country: str) -> list[dict]:
             continue
         dts = [app.at(d, today_t[p]) for p in sd.PRAYER_NAMES]
         next_fajr = app.at(d + timedelta(days=1), next_t["Bomdod"])
-        rows = db.q("SELECT id, prayer, status FROM occurrences WHERE prayer IS NOT NULL AND date = ?",
-                    (d.isoformat(),))
         for row in rows:
-            if row["status"] != "pending":
-                continue
             deadline = qazo.qazo_deadline(sd.PRAYER_NAMES.index(row["prayer"]), dts, next_fajr)
             if deadline and current >= deadline:
                 made = qazo.create_qazo(row["id"], row["prayer"], d, current.isoformat())

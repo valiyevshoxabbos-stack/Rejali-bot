@@ -15,7 +15,7 @@ import qazo as qz
 import services as sv
 
 PRAYERS = ("Bomdod", "Peshin", "Asr", "Shom", "Xufton")
-JOB_PREFIXES = ("rem_", "info_", "wake_prompt", "uni_", "qazo_dl_")
+JOB_PREFIXES = ("rem_", "info_", "uni_", "qazo_dl_")
 
 
 async def send_info(text: str):
@@ -40,7 +40,10 @@ async def schedule_today():
     _clear_day_jobs()
 
     valid = set()
+    open_sleep = feat_sleep.has_open_sleep()
     for rem in sv.reminders_for_day(today):
+        if rem.get("slug") == "yotish" and open_sleep:
+            continue
         valid.add(feat_reminders.schedule_reminder_today(rem, today))
 
     # Vaqti o'zgargani yoki o'chirilgani sabab yaroqsiz bo'lgan kelajakdagi yozuvlarni tozalash
@@ -72,8 +75,6 @@ async def schedule_today():
                 app.schedule_job(dl, feat_qazo.check_qazo, [], f"qazo_dl_{idx}")
         # Kechagi Xufton qazosi (bugungi Bomdod + 15 daqiqa)
         app.schedule_job(dts[0] + timedelta(minutes=qz.QAZO_GRACE_MINUTES), feat_qazo.check_qazo, [], "qazo_dl_prev")
-        if not feat_sleep.woke_today(today):
-            app.schedule_job(dts[0], feat_sleep.send_wake_prompt, [], "wake_prompt")
 
     if not sv.pause_active(today):
         for item in sv.school_lesson_reminders(today):

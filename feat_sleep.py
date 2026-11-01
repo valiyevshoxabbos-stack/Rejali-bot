@@ -1,25 +1,29 @@
 """
-Uyqu ritmi (3.0.1):
-- "Yotish vaqti" eslatmasi tasdiqlangach, uyqu boshi = tasdiqlangan payt + kechikish (standart 20 daq).
-- Bomdod vaqtida "uyg'ondim" xabari: agar bugun uyg'onish allaqachon qayd etilgan bo'lsa yuborilmaydi;
-  eski tugma ikkinchi marta bosilsa dublikat yaratmaydi.
-- Qo'lda tungi uyqu kiritish (/uyqu_kiritish yoki menyu):
-  `18-19.10.2026 23:30-5:04`, `18.10 23:30 - 19.10 05:04`, `23:30-05:04` (3–16 soat, ustma-ust tekshiruvi bilan).
+Uyqu ritmi (3.1 — birlashtirilgan bitta xabarli oqim):
+1) Vaqtidan oldin chaqirish: menyudan "Yotdim", `/yotdim` yoki `/uyqu` orqali 22:00 dan avval chaqirilsa,
+   tungi uyqu xabari darhol faollashadi va 22:00 dagi APScheduler eslatmasi bekor qilinadi.
+2) Bitta xabarda tugmalar almashishi: "Uxladim / Yotdim" bosilganda yangi xabar yuborilmaydi —
+   shu xabarning o'zi tahrirlanib ("😴 Uyqu qayd etildi..."), ostidagi tugma "☀️ Uyg'ondim" ga aylanadi.
+3) Tongda Bomdod vaqtida alohida "Uyg'ondim" so'rovi yuborilmaydi: kechagi bitta xabardagi
+   "☀️ Uyg'ondim" tugmasi bosilishi bilan sikl yopiladi.
+4) Qo'lda tungi uyqu kiritish (/uyqu_kiritish) ham to'liq ishlaydi.
 """
 
 import re
 from datetime import date, datetime, timedelta
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.state import State, StatesGroup, default_state
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import app
 import db
 import feat_common as common
+import feat_journal as journal
 import messenger
+import services as sv
 
 router = Router()
 MIN_SLEEP_MIN = 3 * 60
@@ -54,6 +58,20 @@ def fmt_min(m: int | None) -> str:
     return f"{m // 60} s {m % 60:02d} daq"
 
 
+def _open_sleep_row() -> dict | None:
+    row = db.q1("SELECT * FROM sleep_log WHERE wake_at IS NULL AND sleep_start IS NOT NULL ORDER BY id DESC")
+    if not row:
+        return None
+    start = datetime.fromisoformat(row["sleep_start"])
+    if (app.now() - start).total_seconds() > MAX_SLEEP_MIN * 60:
+        return None
+    return row
+
+
+def has_open_sleep() -> bool:
+    return _open_sleep_row() is not None
+
+
 def woke_today(d: date | None = None) -> bool:
     """Shu sana uchun uyg'onish allaqachon qayd etilganmi."""
     d = d or app.today()
@@ -62,6 +80,28 @@ def woke_today(d: date | None = None) -> bool:
     end_iso = datetime(end_d.year, end_d.month, end_d.day, 0, 0, tzinfo=app.TZ).isoformat()
     row = db.q1("SELECT 1 FROM sleep_log WHERE wake_at >= ? AND wake_at < ? LIMIT 1", (start_iso, end_iso))
     return row is not None
+
+
+def cancel_tonight_bedtime_job(award_if_pending: bool = False) -> int:
+    """
+    Bugungi 22:00 'yotish' eslatmasini APScheduler'dan olib tashlaydi (takroriy xabar kelmasin).
+    `award_if_pending=True` bo'lsa, bugungi yotish yozuvini 'done' qilib ballini ham beradi.
+    """
+    today = app.today()
+    yotish = db.q1("SELECT * FROM reminders WHERE source = 'standard' AND slug = 'yotish' AND active = 1")
+    if not yotish:
+        return 0
+    occ_id = sv.ensure_occurrence(yotish, today)
+    job = app.scheduler.get_job(f"rem_{occ_id}")
+    if job:
+        job.remove()
+    if not award_if_pending:
+        return 0
+    occ = sv.get_occurrence(occ_id)
+    if occ and occ["status"] == "pending" and not sv.pause_active(today) and sv.effective_mode(yotish, today) != "off":
+        res = sv.mark_done(occ_id)
+        return res.get("points", 0)
+    return 0
 
 
 def on_bedtime_confirmed(confirmed_at: datetime | None = None) -> datetime:
@@ -82,8 +122,6 @@ def on_bedtime_confirmed(confirmed_at: datetime | None = None) -> datetime:
 
 def finish_sleep(wake_at: datetime, source: str) -> dict:
     """Uyg'onish vaqtini qayd etadi. {'duration': daq|None} yoki {'error': matn}"""
-    if woke_today(wake_at.date()):
-        return {"already": True}
     open_row = db.q1(
         "SELECT * FROM sleep_log WHERE wake_at IS NULL AND sleep_start IS NOT NULL ORDER BY id DESC")
     if open_row:
@@ -94,9 +132,32 @@ def finish_sleep(wake_at: datetime, source: str) -> dict:
                   (wake_at.isoformat(), minutes, source, open_row["id"]))
             return {"duration": minutes, "start": start}
         if minutes <= 0:
-            return {"error": "Uyg'onish vaqti uyqu boshlanishidan oldin chiqdi. Vaqtni qayta tekshiring."}
+            return {"error": "Uyg'onish vaqti uyqu boshlanishidan oldin chiqdi (kechikishni hisobga olganda)."}
+    if woke_today(wake_at.date()):
+        return {"already": True}
     db.ins("INSERT INTO sleep_log (wake_at, wake_source) VALUES (?,?)", (wake_at.isoformat(), source))
     return {"duration": None}
+
+
+def sleeping_kb() -> InlineKeyboardMarkup:
+    """Yotish tasdiqlangach xabar ostida qoladigan yagona tugma."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="☀️ Uyg'ondim", callback_data="wk:0")],
+    ])
+
+
+def sleeping_text(start: datetime, points: int = 0) -> str:
+    pts_line = f"\n⭐ +{points} ball" if points else ""
+    return (
+        f"😴 <b>Uyqu qayd etildi</b>\n"
+        f"🕒 Uyqu hisobi <b>{start.strftime('%H:%M')}</b> dan boshlanadi.{pts_line}\n\n"
+        "Xayrli tun! Tongda uyg'ongach pastdagi tugmani bosing:"
+    )
+
+
+async def turn_into_sleeping_message(message, start: datetime, points: int = 0):
+    """Mavjud xabarni yangi xabar yubormasdan 'Uyqu qayd etildi' + '☀️ Uyg'ondim' holatiga aylantiradi."""
+    await messenger.edit_actionable(message, sleeping_text(start, points), sleeping_kb(), category="wake")
 
 
 def wake_keyboard() -> InlineKeyboardMarkup:
@@ -107,13 +168,6 @@ def wake_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="−1 soat", callback_data="wk:60")],
         [InlineKeyboardButton(text="🕐 Vaqtni yozaman", callback_data="wk:manual")],
     ])
-
-
-async def send_wake_prompt():
-    if woke_today(app.today()):
-        return
-    await messenger.send("☀️ <b>Xayrli tong!</b> Qachon uyg'ondingiz?", "wake", wake_keyboard(),
-                         actionable=True, bind_trigger=False)
 
 
 def _result_text(res: dict, wake_at: datetime) -> str:
@@ -127,12 +181,11 @@ def _result_text(res: dict, wake_at: datetime) -> str:
 
 @router.callback_query(F.data.startswith("wk:"))
 async def cb_wake(cb: CallbackQuery, state: FSMContext):
-    if woke_today(app.today()):
-        await cb.answer("Bugungi uyg'onish allaqachon qayd etilgan", show_alert=True)
-        await messenger.edit_result(cb.message, "☀️ Bugungi uyg'onish allaqachon qayd etilgan.", "reminder_done")
-        return
     arg = cb.data.split(":")[1]
     if arg == "manual":
+        if not has_open_sleep() and woke_today(app.today()):
+            await cb.answer("Bugungi uyg'onish allaqachon qayd etilgan", show_alert=True)
+            return
         await cb.answer()
         await state.clear()
         await state.set_state(WakeTime.waiting)
@@ -142,12 +195,13 @@ async def cb_wake(cb: CallbackQuery, state: FSMContext):
     wake_at = app.now() - timedelta(minutes=int(arg))
     res = finish_sleep(wake_at, "tap" if arg == "0" else f"tap-{arg}")
     if res.get("already"):
-        await cb.answer("Uyg'onish allaqachon qayd etilgan", show_alert=True)
+        await cb.answer("Bugungi uyg'onish allaqachon qayd etilgan", show_alert=True)
+        await messenger.edit_result(cb.message, "☀️ Bugungi uyg'onish allaqachon qayd etilgan.", "reminder_done")
         return
     if "error" in res:
         await cb.answer(res["error"], show_alert=True)
         return
-    await cb.answer()
+    await cb.answer("Xayrli tong!")
     await messenger.edit_result(cb.message, _result_text(res, wake_at), "reminder_done")
 
 
@@ -183,6 +237,78 @@ async def process_wake_time(message: Message, state: FSMContext):
         await messenger.edit_result_by_id(data["wake_msg"], text)
     else:
         await messenger.send(text, "reminder_done", bind_trigger=False)
+
+
+# ------------------------------------------------------------------ menyu va vaqtidan oldin chaqirish
+
+def menu_kb() -> InlineKeyboardMarkup:
+    if has_open_sleep():
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="☀️ Uyg'ondim", callback_data="wk:0")],
+            [InlineKeyboardButton(text="✍️ Qo'lda kiritish", callback_data="ms:start")],
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="😴 Uxladim / Yotdim", callback_data="sl:bed")],
+        [
+            InlineKeyboardButton(text="☀️ Uyg'ondim", callback_data="sl:wake"),
+            InlineKeyboardButton(text="✍️ Qo'lda kiritish", callback_data="ms:start"),
+        ],
+    ])
+
+
+def _sleep_prompt_text() -> str:
+    open_row = _open_sleep_row()
+    if open_row:
+        st = datetime.fromisoformat(open_row["sleep_start"])
+        return sleeping_text(st)
+    last = db.q1("SELECT * FROM sleep_log WHERE duration_min IS NOT NULL ORDER BY wake_at DESC, id DESC")
+    info = f"Oxirgi uyqu: <b>{fmt_min(last['duration_min'])}</b>\n" if last else ""
+    return f"🌙 <b>Tungi uyqu</b>\n{info}Yotishga tayyor bo'lsangiz tugmani bosing:"
+
+
+@router.callback_query(F.data == "sl:menu")
+async def cb_menu(cb: CallbackQuery):
+    await cb.answer()
+    cancel_tonight_bedtime_job(award_if_pending=False)
+    await messenger.send(_sleep_prompt_text(), "wake", menu_kb(), actionable=True, bind_trigger=False)
+
+
+@router.message(Command("uyqu"))
+async def cmd_sleep(message: Message):
+    # 22:00 dan avval buyruq bilan chaqirilsa bugungi 22:00 rejalashtirilgan eslatmasi bekor qilinadi
+    cancel_tonight_bedtime_job(award_if_pending=False)
+    await messenger.send(_sleep_prompt_text(), "wake", menu_kb(), actionable=True)
+
+
+@router.message(Command("yotdim"))
+@router.message(StateFilter(default_state), F.text.lower().in_({"yotdim", "uxladim"}))
+async def cmd_bed_direct(message: Message):
+    pts = cancel_tonight_bedtime_job(award_if_pending=True)
+    start = on_bedtime_confirmed()
+    today = app.today()
+    if pts and db.get_setting(f"journal_{today.isoformat()}"):
+        await journal.sync(today)
+    await messenger.send(sleeping_text(start, pts), "wake", sleeping_kb(), actionable=True)
+
+
+@router.callback_query(F.data == "sl:bed")
+async def cb_bed(cb: CallbackQuery):
+    pts = cancel_tonight_bedtime_job(award_if_pending=True)
+    start = on_bedtime_confirmed()
+    await cb.answer("Xayrli tun!")
+    await turn_into_sleeping_message(cb.message, start, pts)
+    today = app.today()
+    if pts and db.get_setting(f"journal_{today.isoformat()}"):
+        await journal.sync(today)
+
+
+@router.callback_query(F.data == "sl:wake")
+async def cb_wake_menu(cb: CallbackQuery):
+    if not has_open_sleep() and woke_today(app.today()):
+        await cb.answer("Bugungi uyg'onish allaqachon qayd etilgan", show_alert=True)
+        return
+    await cb.answer()
+    await messenger.edit_actionable(cb.message, "☀️ <b>Qachon uyg'ondingiz?</b>", wake_keyboard(), category="wake")
 
 
 # ------------------------------------------------------------------ qo'lda tungi uyqu kiritish (/uyqu_kiritish)
@@ -311,7 +437,6 @@ def _find_overlaps(start_dt: datetime, wake_dt: datetime) -> list[int]:
 def save_manual_sleep(start_dt: datetime, wake_dt: datetime, minutes: int, replace_ids: list[int] | None = None):
     for rid in (replace_ids or []):
         db.ex("DELETE FROM sleep_log WHERE id = ?", (rid,))
-    # Shu tunning ochiq sikli bo'lsa yopamiz (osilib qolmasligi uchun)
     for op in db.q("SELECT id, sleep_start FROM sleep_log WHERE wake_at IS NULL AND sleep_start IS NOT NULL"):
         op_start = datetime.fromisoformat(op["sleep_start"])
         if abs((wake_dt - op_start).total_seconds()) <= 20 * 3600:
@@ -321,10 +446,6 @@ def save_manual_sleep(start_dt: datetime, wake_dt: datetime, minutes: int, repla
         "VALUES (NULL, ?, ?, ?, 'manual-entry')",
         (start_dt.isoformat(), wake_dt.isoformat(), minutes),
     )
-    if wake_dt.date() == app.today():
-        job = app.scheduler.get_job("wake_prompt")
-        if job:
-            job.remove()
 
 
 async def start_manual_entry(state: FSMContext):
@@ -352,6 +473,10 @@ async def cmd_manual_sleep(message: Message, state: FSMContext):
 @router.callback_query(F.data == "ms:start")
 async def cb_manual_start(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
+    await messenger.delete_quiet(cb.message.message_id)
+    if not has_open_sleep():
+        import jobs
+        await jobs.schedule_today()
     await start_manual_entry(state)
 
 
@@ -409,50 +534,6 @@ async def cb_manual_replace(cb: CallbackQuery, state: FSMContext):
         f"({start_dt.strftime('%d.%m %H:%M')} – {wake_dt.strftime('%d.%m %H:%M')})",
         "confirm", bind_trigger=False,
     )
-
-
-# ------------------------------------------------------------------ qo'lda yotish va menyu
-
-def menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="😴 Yotdim (hozir)", callback_data="sl:bed"),
-            InlineKeyboardButton(text="☀️ Uyg'ondim", callback_data="sl:wake"),
-        ],
-        [InlineKeyboardButton(text="✍️ Qo'lda kiritish", callback_data="ms:start")],
-    ])
-
-
-@router.callback_query(F.data == "sl:menu")
-async def cb_menu(cb: CallbackQuery):
-    await cb.answer()
-    last = db.q1("SELECT * FROM sleep_log WHERE duration_min IS NOT NULL ORDER BY wake_at DESC, id DESC")
-    text = "😴 <b>Uyqu</b>\n"
-    text += f"Oxirgi uyqu: {fmt_min(last['duration_min'])}" if last else "Hali ma'lumot yo'q."
-    await messenger.send(text, "info", menu_kb(), bind_trigger=False)
-
-
-@router.message(Command("uyqu"))
-async def cmd_sleep(message: Message):
-    last = db.q1("SELECT * FROM sleep_log WHERE duration_min IS NOT NULL ORDER BY wake_at DESC, id DESC")
-    text = "😴 <b>Uyqu</b>\n" + (f"Oxirgi uyqu: {fmt_min(last['duration_min'])}" if last else "Hali ma'lumot yo'q.")
-    await messenger.send(text, "info", menu_kb())
-
-
-@router.callback_query(F.data == "sl:bed")
-async def cb_bed(cb: CallbackQuery):
-    start = on_bedtime_confirmed()
-    await cb.answer()
-    await messenger.edit_result(cb.message, f"😴 Yotish qayd etildi. Uyqu {start.strftime('%H:%M')} dan hisoblanadi.", "confirm")
-
-
-@router.callback_query(F.data == "sl:wake")
-async def cb_wake_menu(cb: CallbackQuery):
-    if woke_today(app.today()):
-        await cb.answer("Bugungi uyg'onish allaqachon qayd etilgan", show_alert=True)
-        return
-    await cb.answer()
-    await messenger.send("☀️ Qachon uyg'ondingiz?", "wake", wake_keyboard(), actionable=True, bind_trigger=False)
 
 
 # ------------------------------------------------------------------ statistika

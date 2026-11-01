@@ -83,10 +83,12 @@ class City(StatesGroup):
 
 @router.callback_query(F.data == "se:loc")
 async def cb_loc(cb: CallbackQuery):
+    loc = sv.weather_location()
     lat, lon = db.get_setting("lat"), db.get_setting("lon")
-    coords = f"{lat}, {lon}" if lat and lon else "yuborilmagan"
+    coords = f"{lat}, {lon}" if lat and lon else f"{loc['lat']}, {loc['lon']} (Chirchiq standart)"
+    elev_s = f"{loc['elevation']} m" if loc["elevation"] is not None else "avto (DEM)"
     await nav(cb, f"📍 <b>Joylashuv</b>\n\nShahar (namoz vaqtlari uchun): <b>{app.esc(sv.get_city())}</b>\n"
-                  f"Koordinata (ob-havo uchun, 3.1): {coords}",
+                  f"Koordinata (ob-havo uchun): {coords}\nBalandlik: {elev_s} (<code>/balandlik</code>)",
               [[btn("🏙 Shaharni o'zgartirish", "se:city")], [btn("📍 Joylashuvni yuborish", "se:geo")], [BACK]])
 
 
@@ -140,6 +142,7 @@ async def cb_geo(cb: CallbackQuery):
 async def got_location(message: Message):
     db.set_setting("lat", f"{message.location.latitude:.4f}")
     db.set_setting("lon", f"{message.location.longitude:.4f}")
+    sv.clear_weather_cache()
     await messenger.send("✅ Joylashuv saqlandi.", "confirm")
     await messenger.send("Asosiy menyu:", "system", common.main_kb(), deletable=False, bind_trigger=False)
 
@@ -377,6 +380,10 @@ async def cb_csv(cb: CallbackQuery):
     s = db.q("SELECT bed_confirmed_at, sleep_start, wake_at, duration_min, wake_source FROM sleep_log ORDER BY id")
     o = db.q("SELECT date, title, status, late_minutes, points FROM occurrences WHERE prayer IS NULL ORDER BY date, scheduled_at")
     n = db.q("SELECT date, text, created_at FROM notes ORDER BY id")
+    ex = db.q(
+        "SELECT e.created_at, ss.name AS sname, ss.type AS stype, e.title, e.amount, e.payer, "
+        "e.qty, e.unit, e.unit_price FROM expenses e LEFT JOIN sessions ss ON ss.id = e.session_id ORDER BY e.id"
+    )
     files = [
         ("vazn.csv", ["vaqt", "kg", "asosiy"], [[r["at"], r["kg"], r["is_primary"]] for r in w]),
         ("tugilgan_kunlar.csv", ["ism", "kun", "oy", "yil"], [[r["name"], r["day"], r["month"], r["year"] or ""] for r in b]),
@@ -385,6 +392,10 @@ async def cb_csv(cb: CallbackQuery):
         ("reja.csv", ["sana", "nomi", "holat", "kechikish_daq", "ball"],
          [[r["date"], r["title"], r["status"], r["late_minutes"], r["points"]] for r in o]),
         ("izohlar.csv", ["sana", "matn", "yaratilgan"], [[r["date"], r["text"], r["created_at"]] for r in n]),
+        ("xarajatlar.csv", ["vaqt", "sessiya", "tur", "nomi", "summa", "tolovchi", "miqdor", "birlik", "birlik_narx"],
+         [[r["created_at"], r["sname"] or "", r["stype"] or "", r["title"], r["amount"], r["payer"],
+           r["qty"] if r["qty"] is not None else "", r["unit"] or "", r["unit_price"] if r["unit_price"] is not None else ""]
+          for r in ex]),
     ]
     for name, headers, rows in files:
         await app.bot.send_document(app.CHAT_ID, BufferedInputFile(_csv(headers, rows), filename=name),
@@ -415,7 +426,8 @@ async def process_wipe(message: Message, state: FSMContext):
                              "confirm", bind_trigger=False)
         return
     for table in ("occurrences", "qazo", "notes", "checkpoint_status", "overrides", "sleep_log", "weight_log",
-                  "birthdays", "birthday_notices", "msg_log", "cleanup_events", "checkpoints"):
+                  "birthdays", "birthday_notices", "msg_log", "cleanup_events", "checkpoints",
+                  "expense_splits", "expenses", "sessions"):
         db.ex(f"DELETE FROM {table}")
     db.ex("DELETE FROM reminders WHERE source = 'custom'")
     db.ex("UPDATE reminders SET mode = 'required', off_until = NULL")

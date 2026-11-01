@@ -45,12 +45,12 @@ def get_checkpoints(occ_id: int) -> list[dict]:
         "ORDER BY c.position", (occ_id, occ_id))
 
 
-def action_kb(occ_id: int) -> InlineKeyboardMarkup:
+def action_kb(occ_id: int, done_label: str = "✅ Bajardim") -> InlineKeyboardMarkup:
     rows = []
     for cp in get_checkpoints(occ_id):
         mark = "☑️" if cp["done"] else "⬜"
         rows.append([InlineKeyboardButton(text=f"{mark} {cp['title']}", callback_data=f"cp:{occ_id}:{cp['id']}")])
-    rows.append([InlineKeyboardButton(text="✅ Bajardim", callback_data=f"done:{occ_id}"),
+    rows.append([InlineKeyboardButton(text=done_label, callback_data=f"done:{occ_id}"),
                  InlineKeyboardButton(text="❌ Bajarmadim", callback_data=f"skip:{occ_id}")])
     rows.append([InlineKeyboardButton(text="⏳ Kechiktirish", callback_data=f"post:{occ_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -89,7 +89,8 @@ async def send_reminder(occ_id: int):
         await messenger.send(text, "reminder", optional_kb(occ_id), actionable=True, bind_trigger=False)
         return
     icon = scoring.PRIORITY_ICON.get(sv.get_priority(occ), "")
-    kb = prayer_kb(occ_id) if occ.get("prayer") else action_kb(occ_id)
+    done_lbl = "😴 Uxladim / Yotdim" if (rem and rem.get("slug") == "yotish") else "✅ Bajardim"
+    kb = prayer_kb(occ_id) if occ.get("prayer") else action_kb(occ_id, done_lbl)
     text = f"⏰ {icon} <b>{app.esc(occ['title'])}</b>\n🕒 {scheduled.strftime('%H:%M')}{note_s}\n\n{status_line()}"
     await messenger.send(text, "reminder", kb, actionable=True, bind_trigger=False)
 
@@ -140,16 +141,21 @@ async def cb_done(cb: CallbackQuery):
     if "error" in result:
         await cb.answer("Allaqachon belgilangan")
         return
+    occ = sv.get_occurrence(occ_id)
+    rem = sv.get_reminder_of(occ)
+    occ_date = date.fromisoformat(occ["date"])
+    if rem and rem["slug"] == "yotish":
+        await cb.answer("Xayrli tun!")
+        sleep.cancel_tonight_bedtime_job(award_if_pending=False)
+        start = sleep.on_bedtime_confirmed()
+        await sleep.turn_into_sleeping_message(cb.message, start, result.get("points", 0))
+        if db.get_setting(f"journal_{occ_date.isoformat()}"):
+            await journal.sync(occ_date)
+        return
     await cb.answer("Bajarildi!")
     line = f"✅ Bajarildi ({fmt_late(result['late_minutes'])})"
     if result["points"]:
         line += f"\n⭐ +{result['points']} ball" + (" (kechiktirilgan, yarim ball)" if result["was_postponed"] else "")
-    occ = sv.get_occurrence(occ_id)
-    rem = sv.get_reminder_of(occ)
-    if rem and rem["slug"] == "yotish":
-        start = sleep.on_bedtime_confirmed()
-        line += f"\n😴 Uyqu {start.strftime('%H:%M')} dan hisoblanadi"
-    occ_date = date.fromisoformat(occ["date"])
     await journal.record_and_replace(occ_date, cb.message, f"{cb.message.html_text}\n\n{line}")
 
 
@@ -196,6 +202,12 @@ async def cb_optional(cb: CallbackQuery):
     await cb.answer()
 
 
+def _done_label_for(occ_id: int) -> str:
+    occ = sv.get_occurrence(occ_id)
+    rem = sv.get_reminder_of(occ) if occ else None
+    return "😴 Uxladim / Yotdim" if (rem and rem.get("slug") == "yotish") else "✅ Bajardim"
+
+
 @router.callback_query(F.data.startswith("cp:"))
 async def cb_checkpoint(cb: CallbackQuery):
     _, occ_id_s, cp_id_s = cb.data.split(":")
@@ -205,7 +217,7 @@ async def cb_checkpoint(cb: CallbackQuery):
           "ON CONFLICT(checkpoint_id, occurrence_id) DO UPDATE SET done = excluded.done",
           (cp_id, occ_id, 0 if (row and row["done"]) else 1))
     await cb.answer()
-    await cb.message.edit_reply_markup(reply_markup=action_kb(occ_id))
+    await cb.message.edit_reply_markup(reply_markup=action_kb(occ_id, _done_label_for(occ_id)))
 
 
 # ------------------------------------------------------------------ kechiktirish
@@ -233,7 +245,8 @@ async def cb_postpone(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("back:"))
 async def cb_back(cb: CallbackQuery):
     await cb.answer()
-    await cb.message.edit_reply_markup(reply_markup=action_kb(int(cb.data.split(":")[1])))
+    occ_id = int(cb.data.split(":")[1])
+    await cb.message.edit_reply_markup(reply_markup=action_kb(occ_id, _done_label_for(occ_id)))
 
 
 async def finish_postpone(occ_id: int, target: datetime, message_id: int | None):
@@ -328,13 +341,19 @@ async def cb_quick_log(cb: CallbackQuery):
     if "error" in result:
         await cb.answer(f"{result.get('title', '')}: {result['error']}", show_alert=True)
         return
+    rem = db.q1("SELECT slug FROM reminders WHERE id = ?", (rid,))
+    if rem and rem["slug"] == "yotish":
+        await cb.answer("Xayrli tun!")
+        sleep.cancel_tonight_bedtime_job(award_if_pending=False)
+        start = sleep.on_bedtime_confirmed()
+        await sleep.turn_into_sleeping_message(cb.message, start, result.get("points", 0))
+        if db.get_setting(f"journal_{app.today().isoformat()}"):
+            await journal.sync(app.today())
+        return
     await cb.answer("Qayd etildi!")
     line = f"✅ <b>{app.esc(result['title'])}</b> qayd etildi"
     if result["points"]:
         line += f"\n⭐ +{result['points']} ball"
-    rem = db.q1("SELECT slug FROM reminders WHERE id = ?", (rid,))
-    if rem and rem["slug"] == "yotish":
-        line += f"\n😴 Uyqu {sleep.on_bedtime_confirmed().strftime('%H:%M')} dan hisoblanadi"
     await journal.record_and_replace(app.today(), cb.message, line)
 
 

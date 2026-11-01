@@ -11,6 +11,7 @@ import app
 import db
 import feat_birthdays as birthdays
 import feat_journal as journal
+import feat_weather as weather
 import messenger
 import qazo
 import scoring
@@ -62,7 +63,7 @@ def today_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="➕ Bajardim", callback_data="ql:list"),
         InlineKeyboardButton(text="🕌 Qazolar", callback_data="qz:list"),
     ], [
-        InlineKeyboardButton(text="😴 Uyqu", callback_data="sl:menu"),
+        InlineKeyboardButton(text="😴 Yotdim / Uyqu", callback_data="sl:menu"),
         InlineKeyboardButton(text="⏸ Pauza", callback_data="pz:open"),
     ]])
 
@@ -80,6 +81,7 @@ async def cmd_today(message: Message):
 async def send_morning():
     d = app.today()
     text = "🌅 <b>Xayrli tong!</b>\n\n" + await build_today_text()
+    text += await weather.morning_weather_section()
     bdays = birthdays.today_lines(d)
     if bdays:
         text += "\n\n" + "\n".join(bdays)
@@ -106,7 +108,8 @@ async def send_evening():
         lines += [f"• {app.esc(r['title'])} — {names[r['status']]}" for r in left]
     if len(lines) == 1:
         lines.append("Bugun uchun yozuv yo'q.")
-    await messenger.send("\n".join(lines) + qazo_block(), "summary", bind_trigger=False)
+    tom_wx = await weather.evening_tomorrow_section()
+    await messenger.send("\n".join(lines) + tom_wx + qazo_block(), "summary", bind_trigger=False)
 
 
 def register_jobs(scheduler):

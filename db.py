@@ -175,7 +175,42 @@ ALTER TABLE qazo_v2 RENAME TO qazo;
 CREATE INDEX idx_qazo_code_status ON qazo(code, status);
 """
 
-MIGRATIONS = [MIGRATION_1, MIGRATION_2]
+# v3 (3.1/3.2): Xarajatlar kalkulyatori jadvallari (bozorlik, restoran, safar).
+MIGRATION_3 = """
+CREATE TABLE sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,                  -- market | restaurant | trip
+    status TEXT NOT NULL DEFAULT 'open', -- open | closed
+    service_pct REAL NOT NULL DEFAULT 0,
+    participants TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE expenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    payer TEXT NOT NULL,
+    qty REAL,
+    unit TEXT,
+    unit_price INTEGER,
+    is_shared INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_expenses_session ON expenses(session_id);
+CREATE INDEX idx_expenses_item ON expenses(title, unit);
+
+CREATE TABLE expense_splits (
+    expense_id INTEGER NOT NULL,
+    user_name TEXT NOT NULL,
+    share_amount INTEGER NOT NULL,
+    PRIMARY KEY (expense_id, user_name)
+);
+"""
+
+MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3]
 
 REQUIRED_TABLES = (
     "settings", "reminders", "overrides", "checkpoints", "checkpoint_status",

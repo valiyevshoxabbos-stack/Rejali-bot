@@ -1,5 +1,5 @@
 """
-AltronBek 3.0.1: kirish nuqtasi (yassi tuzilma: feat_*.py).
+AltronBek 3.1: kirish nuqtasi (yassi tuzilma: feat_*.py).
 
 Asosiy modullar majburiy: yo'q bo'lsa bot ishga tushmaydi (xato darhol ko'rinadi).
 Ixtiyoriy modullar (feat_weather, feat_calculator ...) yo'q bo'lsa, menyu "keyingi versiyada" deb javob beradi.
@@ -27,12 +27,15 @@ OPTIONAL = ["weather", "calculator"]
 
 COMMANDS = [
     ("bugun", "Bugungi reja"),
+    ("obhavo", "Ob-havo va kiyim tavsiyasi"),
+    ("hisob", "Xarajatlar kalkulyatori"),
     ("qoshish", "Yangi eslatma"),
     ("royxat", "Maxsus eslatmalar"),
     ("qazolar", "Ochiq qazolar"),
     ("statistika", "Statistika"),
     ("vazn", "Vazn kiritish"),
     ("uyqu", "Uyqu"),
+    ("yotdim", "Tungi uyquni boshlash"),
     ("uyqu_kiritish", "Uyquni qo'lda kiritish"),
     ("tkunlar", "Tug'ilgan kunlar"),
     ("izohlar", "Saqlangan izohlar"),

@@ -84,8 +84,8 @@ def sleep_text(period: str) -> str:
     days = 7 if period == "week" else 30
     s = sleep.stats(days)
     if not s["nights"]:
-        return ("<b>😴 Uyqu</b>\n\nHali ma'lumot yo'q. Yotish eslatmasida ✅ bosing, ertalab "
-                "\"uyg'ondim\" xabariga javob bering yoki /uyqu_kiritish dan foydalaning.")
+        return ("<b>😴 Uyqu</b>\n\nHali ma'lumot yo'q. Yotish xabarida «😴 Uxladim / Yotdim» bosing, "
+                "tongda o'sha xabardagi «☀️ Uyg'ondim» tugmasini bosing yoki /uyqu_kiritish dan foydalaning.")
     return (f"<b>😴 Uyqu</b> ({days} kun)\n\nYozilgan tunlar: {s['nights']}\n"
             f"O'rtacha uyqu: <b>{sleep.fmt_min(s['avg'])}</b>\nO'rtacha uyquga ketish: {s['avg_start']}\n"
             f"Tunlar: {bars(s['series'][-14:])}\n\n"
@@ -108,7 +108,58 @@ def weight_text(period: str) -> str:
 
 
 def market_text(period: str) -> str:
-    return "<b>🛒 Bozorlik</b>\n\nBu bo'lim kalkulyator (3.2) bilan birga qo'shiladi."
+    days = 7 if period == "week" else 30
+    since = (app.now() - timedelta(days=days)).isoformat()
+    tot_row = db.q1(
+        "SELECT COUNT(*) AS c, COALESCE(SUM(e.amount), 0) AS s "
+        "FROM expenses e JOIN sessions ss ON ss.id = e.session_id "
+        "WHERE ss.type = 'market' AND e.created_at >= ?",
+        (since,),
+    )
+    items = db.q(
+        "SELECT LOWER(e.title) AS key_t, e.title, e.unit, e.unit_price, e.id "
+        "FROM expenses e JOIN sessions ss ON ss.id = e.session_id "
+        "WHERE ss.type = 'market' AND e.unit_price IS NOT NULL AND e.unit IS NOT NULL "
+        "ORDER BY e.id DESC"
+    )
+    if not tot_row["c"] and not items:
+        return "<b>🛒 Bozorlik</b>\n\nHali ma'lumot yo'q. «🧮 Hisob → 🛒 Bozorlik» orqali kiriting."
+
+    fmt = lambda n: f"{int(round(n)):,}".replace(",", " ")
+    lines = [
+        f"<b>🛒 Bozorlik</b> ({'7 kun' if days == 7 else '30 kun'})\n",
+        f"Xaridlar: <b>{tot_row['c']} ta</b> — jami <b>{fmt(tot_row['s'])} so'm</b>",
+    ]
+    seen = set()
+    dyn_lines = []
+    for it in items:
+        k = (it["key_t"], it["unit"])
+        if k in seen:
+            continue
+        seen.add(k)
+        prev = db.q1(
+            "SELECT unit_price FROM expenses WHERE LOWER(title) = ? AND unit = ? "
+            "AND unit_price IS NOT NULL AND id < ? ORDER BY id DESC LIMIT 1",
+            (it["key_t"], it["unit"], it["id"]),
+        )
+        cur_p = int(it["unit_price"])
+        diff_s = ""
+        if prev and prev["unit_price"] > 0:
+            d = cur_p - int(prev["unit_price"])
+            if d > 0:
+                diff_s = f" (📈 +{round(d / prev['unit_price'] * 100)}%)"
+            elif d < 0:
+                diff_s = f" (📉 {round(d / prev['unit_price'] * 100)}%)"
+            else:
+                diff_s = " (o'zgarmagan)"
+        dyn_lines.append(f"• {app.esc(it['title'])}: <b>{fmt(cur_p)} so'm/{app.esc(it['unit'])}</b>{diff_s}")
+        if len(dyn_lines) >= 12:
+            break
+
+    if dyn_lines:
+        lines.append("\n<b>Birlik narxlar dinamikasi:</b>")
+        lines.extend(dyn_lines)
+    return "\n".join(lines)
 
 
 RENDER = {"plan": plan_text, "pray": pray_text, "sleep": sleep_text, "weight": weight_text, "market": market_text}

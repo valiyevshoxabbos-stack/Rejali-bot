@@ -92,6 +92,19 @@ async def send(
     return msg
 
 
+async def edit_actionable(message, text: str, kb: InlineKeyboardMarkup, category: str = "wake"):
+    """Xabarni harakat talab qiladigan holatga o'tkazib tahrirlaydi (avto-o'chirish tegmaydi, 🗑 qo'shilmaydi)."""
+    try:
+        await message.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e).lower():
+            app.log.error(f"Xabarni tahrirlashda xatolik: {e}")
+    db.ex(
+        "UPDATE msg_log SET category = ?, actionable = 1, text = ? WHERE message_id = ? AND deleted_at IS NULL",
+        (category, text, message.message_id),
+    )
+
+
 async def edit_result(message, text: str, category: str = "reminder_done"):
     """Javob berilgan xabarni yangilaydi: endi harakat talab qilmaydi, o'chirish tugmasi qo'shiladi."""
     try:

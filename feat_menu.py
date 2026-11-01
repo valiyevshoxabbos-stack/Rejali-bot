@@ -19,8 +19,8 @@ router = Router()
 HELP = (
     "Assalomu alaykum, Umarkhan!\n\n<b>AltronBek " + app.VERSION + "</b>\n"
     "Pastdagi tugmalar orqali ishlang. Buyruqlar ham ishlaydi:\n"
-    "/bugun /qoshish /royxat /vaqt /ball /sinf /qazolar /statistika /vazn /uyqu /uyqu_kiritish "
-    "/tkunlar /tugilgan /izoh /izohlar /shahar /tiklash /sozlamalar /holat /bekor"
+    "/bugun /qoshish /royxat /vaqt /ball /sinf /qazolar /statistika /vazn /uyqu /yotdim /uyqu_kiritish "
+    "/obhavo /balandlik /hisob /tkunlar /tugilgan /izoh /izohlar /shahar /tiklash /sozlamalar /holat /bekor"
 )
 
 
@@ -30,7 +30,7 @@ def add_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [b("📝 Eslatma", "add:rem"), b("🎂 Tug'ilgan kun", "add:bday")],
         [b("⚖️ Vazn", "add:weight"), b("📝 Izoh", "add:note")],
-        [b("➕ Bajardim", "ql:list"), b("😴 Uyqu", "sl:menu")],
+        [b("➕ Bajardim", "ql:list"), b("😴 Yotdim / Uyqu", "sl:menu")],
         [b("🎂 Ro'yxat", "bd:list"), b("📒 Izohlar", "nt:list")],
     ])
 
@@ -43,6 +43,9 @@ async def cancel_flow(state: FSMContext):
             os.remove(tmp)
         except OSError:
             pass
+    amb_mid = data.get("amb_prompt_mid")
+    if amb_mid:
+        await messenger.delete_quiet(amb_mid)
     await common.clear_prompts(state)
     await state.clear()
 
@@ -107,7 +110,7 @@ async def _optional_entry(message: Message, state: FSMContext, name: str, label:
 
 @router.message(F.text == common.T_CALC)
 async def btn_calc(message: Message, state: FSMContext):
-    await _optional_entry(message, state, "calculator", "Hisob (kalkulyator)", "3.2")
+    await _optional_entry(message, state, "calculator", "Hisob (kalkulyator)", "3.1")
 
 
 @router.message(F.text == common.T_WEATHER)

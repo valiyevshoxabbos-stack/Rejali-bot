@@ -20,7 +20,7 @@ HELP = (
     "Assalomu alaykum, Umarkhan!\n\n<b>AltronBek " + app.VERSION + "</b>\n"
     "Pastdagi tugmalar orqali ishlang. Tezkor qayd uchun xabarni <code>!</code> bilan boshlang.\n"
     "Buyruqlar:\n"
-    "/bugun /chelenjlar /moliya /qoshish /royxat /vaqt /ball /sinf /qazolar /statistika /vazn /uyqu /yotdim "
+    "/bugun /chelenjlar /moliya /bozorlik /narx /qoshish /royxat /vaqt /ball /sinf /qazolar /statistika /vazn /uyqu /yotdim "
     "/uyqu_kiritish /obhavo /balandlik /hisob /tkunlar /tugilgan /izoh /izohlar /shahar /tiklash /sozlamalar /holat /bekor"
 )
 
@@ -29,11 +29,12 @@ def add_menu_kb() -> InlineKeyboardMarkup:
     def b(t, d):
         return InlineKeyboardButton(text=t, callback_data=d)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [b("📝 Eslatma", "add:rem"), b("🎂 Tug'ilgan kun", "add:bday")],
-        [b("🏆 Chelenj", "add:chl"), b("💰 Moliya", "add:fin")],
-        [b("⚖️ Vazn", "add:weight"), b("📝 Izoh", "add:note")],
-        [b("➕ Bajardim", "ql:list"), b("😴 Yotdim / Uyqu", "sl:menu")],
-        [b("🎂 Ro'yxat", "bd:list"), b("📒 Izohlar", "nt:list")],
+        [b("🛒 Bozorlik", "mk:home"), b("💰 Moliya", "add:fin")],
+        [b("🏆 Chelenj", "add:chl"), b("📝 Eslatma", "add:rem")],
+        [b("🎂 Tug'ilgan kun", "add:bday"), b("⚖️ Vazn", "add:weight")],
+        [b("📝 Izoh", "add:note"), b("➕ Bajardim", "ql:list")],
+        [b("😴 Yotdim / Uyqu", "sl:menu"), b("🎂 Ro'yxat", "bd:list")],
+        [b("📒 Izohlar", "nt:list")],
     ])
 
 

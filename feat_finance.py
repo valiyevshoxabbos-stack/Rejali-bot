@@ -361,7 +361,7 @@ def undo_transaction(tx_id: int) -> dict:
 
     l_kind = tx.get("linked_kind")
     l_id = tx.get("linked_id")
-    if l_kind and l_id and tx.get("undo_meta"):
+    if l_kind and tx.get("undo_meta"):
         meta = json.loads(tx["undo_meta"])
         if l_kind == "loan":
             db.ex(
@@ -379,6 +379,15 @@ def undo_transaction(tx_id: int) -> dict:
                 "UPDATE finance_debts SET amount = ?, status = ? WHERE id = ?",
                 (meta["amount"], meta["status"], l_id),
             )
+        elif l_kind == "market" and meta.get("basket_id"):
+            bid = meta["basket_id"]
+            db.ex("DELETE FROM market_logs WHERE basket_id = ?", (bid,))
+            db.ex("UPDATE market_baskets SET status = 'draft' WHERE id = ?", (bid,))
+            for prev_it in meta.get("prev_items", []):
+                db.ex(
+                    "UPDATE market_items SET last_unit_price = ?, last_location_id = ?, last_bought_date = ? WHERE id = ?",
+                    (prev_it["last_unit_price"], prev_it["last_location_id"], prev_it["last_bought_date"], prev_it["id"]),
+                )
 
     db.ex("DELETE FROM finance_transactions WHERE id = ?", (tx_id,))
     job = app.scheduler.get_job(f"undo_exp_{tx_id}")
@@ -1100,9 +1109,10 @@ def home_view() -> tuple[str, InlineKeyboardMarkup]:
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [btn("➖ Chiqim", "fn:tx:exp"), btn("➕ Kirim", "fn:tx:inc"), btn("🔄 O'tkazma", "fn:tx:trf")],
-        [btn("💳 Hisoblar", "fn:accs"), btn("🤝 Qarz / Haqlar", "fn:debts")],
-        [btn("🏦 Kreditlar", "fn:loans"), btn("🏠 Davriy to'lovlar", "fn:recs")],
-        [btn("📜 Tarix", "fn:hist:0"), btn("🗂 Kategoriyalar", "fn:cmng:exp:home")],
+        [btn("🛒 Bozorlik", "mk:home"), btn("💳 Hisoblar", "fn:accs")],
+        [btn("🤝 Qarz / Haqlar", "fn:debts"), btn("🏦 Kreditlar", "fn:loans")],
+        [btn("🏠 Davriy to'lovlar", "fn:recs"), btn("🗂 Kategoriyalar", "fn:cmng:exp:home")],
+        [btn("📜 Tarix", "fn:hist:0")],
     ])
     return "\n".join(lines), kb
 
@@ -1172,6 +1182,7 @@ async def cb_history(cb: CallbackQuery, state: FSMContext):
 
 def add_hub_view() -> tuple[str, InlineKeyboardMarkup]:
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn("🛒 Smart Bozorlik", "mk:home")],
         [btn("💳 Yangi hisob/karta", "fn:anew"), btn("🤝 Yangi qarz/haq", "fn:dnew")],
         [btn("🏦 Yangi kredit", "fn:lnew"), btn("🏠 Yangi davriy to'lov", "fn:rnew")],
         [btn("➖ Chiqim yozish", "fn:tx:exp"), btn("➕ Kirim yozish", "fn:tx:inc")],

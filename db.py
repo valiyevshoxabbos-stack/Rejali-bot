@@ -346,7 +346,64 @@ CREATE TABLE challenge_freezes (
 );
 """
 
-MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5]
+# v6 (3.6): Smart Bozorlik, Dinamik Savat, Inflyatsiya Monitoringi va Savdo joylari tahlili.
+MIGRATION_6 = """
+CREATE TABLE IF NOT EXISTS market_locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS market_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    default_unit TEXT DEFAULT 'kg',
+    last_unit_price REAL DEFAULT 0,
+    last_location_id INTEGER REFERENCES market_locations(id),
+    last_bought_date DATE,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS market_baskets (
+    id TEXT PRIMARY KEY, -- UUID4 string
+    title TEXT,
+    mode TEXT NOT NULL, -- 'planned' yoki 'active'
+    location_id INTEGER REFERENCES market_locations(id),
+    status TEXT NOT NULL, -- 'draft', 'completed', 'cancelled'
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_mkt_baskets_status ON market_baskets(status, mode);
+
+CREATE TABLE IF NOT EXISTS market_basket_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    basket_id TEXT REFERENCES market_baskets(id),
+    item_id INTEGER REFERENCES market_items(id),
+    location_id INTEGER REFERENCES market_locations(id),
+    quantity REAL NOT NULL,
+    unit TEXT NOT NULL,
+    unit_price REAL DEFAULT 0,
+    total_price REAL DEFAULT 0,
+    is_bought BOOLEAN DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_mkt_bitems_bid ON market_basket_items(basket_id);
+
+CREATE TABLE IF NOT EXISTS market_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    basket_id TEXT REFERENCES market_baskets(id),
+    item_id INTEGER NOT NULL REFERENCES market_items(id),
+    location_id INTEGER REFERENCES market_locations(id),
+    quantity REAL NOT NULL,
+    unit TEXT NOT NULL,
+    unit_price REAL NOT NULL,
+    total_price REAL NOT NULL,
+    price_diff_percent REAL DEFAULT 0,
+    bought_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_mkt_logs_item ON market_logs(item_id, location_id);
+"""
+
+MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6]
+LAST_MIGRATED_FROM: int | None = None
 
 REQUIRED_TABLES = (
     "settings", "reminders", "overrides", "checkpoints", "checkpoint_status",
@@ -537,6 +594,7 @@ def migrate() -> list[str]:
     Mavjud baza yangilansa, har qadamdan oldin `<baza>.pre-v<N>.bak` yaratadi va
     yaratilgan zaxira fayllar ro'yxatini qaytaradi.
     """
+    global LAST_MIGRATED_FROM
     p = path()
     close_db()
     conn = sqlite3.connect(p, timeout=10.0, isolation_level=None)
@@ -544,7 +602,9 @@ def migrate() -> list[str]:
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version >= len(MIGRATIONS):
+            LAST_MIGRATED_FROM = None
             return backups
+        LAST_MIGRATED_FROM = version
         has_existing_data = version > 0 and bool(
             conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").fetchone()
         )

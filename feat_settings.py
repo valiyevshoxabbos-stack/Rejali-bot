@@ -445,6 +445,7 @@ async def process_wipe(message: Message, state: FSMContext):
                   "birthdays", "birthday_notices", "msg_log", "cleanup_events", "checkpoints",
                   "expense_splits", "expenses", "sessions",
                   "challenge_freezes", "challenge_bonuses", "challenge_logs", "challenge_tasks", "challenges",
+                  "market_logs", "market_basket_items", "market_baskets", "market_items", "market_locations",
                   "finance_transactions", "finance_recurring", "finance_loans", "finance_debts", "finance_accounts"):
         db.ex(f"DELETE FROM {table}")
     db.ex("DELETE FROM finance_categories WHERE is_default = 0")

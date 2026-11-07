@@ -1,8 +1,8 @@
 """
-AltronBek 3.5.1: kirish nuqtasi (yassi tuzilma: feat_*.py).
+AltronBek 3.6: kirish nuqtasi (yassi tuzilma: feat_*.py) va Startup Changelog mexanizmi.
 
 Asosiy modullar majburiy: yo'q bo'lsa bot ishga tushmaydi (xato darhol ko'rinadi).
-Ixtiyoriy modullar (feat_weather, feat_calculator, feat_challenges, feat_finance) mavjud bo'lsa avtomatik ulanadi.
+Ixtiyoriy modullar (feat_weather, feat_calculator, feat_challenges, feat_finance, feat_market) mavjud bo'lsa avtomatik ulanadi.
 """
 
 import asyncio
@@ -23,12 +23,24 @@ CORE = [
     "menu", "reminders", "qazo", "sleep", "birthdays", "weight",
     "stats", "settings", "cleanup", "summary", "status", "restore",
 ]
-OPTIONAL = ["weather", "calculator", "challenges", "finance"]
+OPTIONAL = ["weather", "calculator", "challenges", "finance", "market"]
+
+CHANGELOGS: dict[str, str] = {
+    "3.6": (
+        "🚀 <b>AltronBek v3.6 yangilanishi muvaffaqiyatli o'rnatildi!</b>\n"
+        "• 🛒 <b>Smart Bozorlik:</b> Rejalashtirilgan ro'yxat va ayni damdagi xarid rejimlari.\n"
+        "• 📈 <b>Inflyatsiya monitoringi:</b> Narxlarning oldingi xaridga nisbatan dinamikasi.\n"
+        "• 🛡 <b>Anti-Cheat:</b> Narxning asossiz sakrashi (+35%) bo'yicha ogohlantirish.\n"
+        "• 📍 <b>Savdo joylari tahlili:</b> Teglar bo'yicha qayerda arzonroq ekanini aniqlash."
+    ),
+}
 
 COMMANDS = [
     ("bugun", "Bugungi reja"),
     ("chelenjlar", "Chelenjlar paneli"),
     ("moliya", "Moliya boshqaruvi"),
+    ("bozorlik", "Smart Bozorlik va savat"),
+    ("narx", "Mahsulot narxi va joylar tahlili"),
     ("obhavo", "Ob-havo va kiyim tavsiyasi"),
     ("hisob", "Xarajatlar kalkulyatori"),
     ("qoshish", "Yangi eslatma"),
@@ -137,6 +149,27 @@ async def _send_migration_backups(backups: list[str]):
             app.log.error(f"Migratsiya zaxirasini yuborishda xatolik: {e}")
 
 
+async def check_startup_changelog() -> bool:
+    """
+    PRAGMA user_version yoki joriy release (app.VERSION) o'zgargan bo'lsa,
+    Telegramga yangilanish (Startup Changelog) kartochkasini bir marta yuboradi.
+    """
+    cur_schema = str(db.schema_version())
+    prev_schema = db.get_setting("last_schema_version")
+    prev_release = db.get_setting("last_release")
+    schema_updated = (db.LAST_MIGRATED_FROM is not None) or (prev_schema != cur_schema)
+    release_updated = (prev_release != app.VERSION)
+    if not (schema_updated or release_updated):
+        return False
+    db.set_setting("last_schema_version", cur_schema)
+    db.set_setting("last_release", app.VERSION)
+    card = CHANGELOGS.get(app.VERSION)
+    if not card:
+        return False
+    await messenger.send(card, "system", bind_trigger=False)
+    return True
+
+
 async def amain():
     backups = db.init_db()
     if db.get_setting("epoch") is None:
@@ -153,6 +186,7 @@ async def amain():
         app.log.warning(f"Buyruqlar ro'yxatini o'rnatib bo'lmadi: {e}")
     if backups:
         await _send_migration_backups(backups)
+    await check_startup_changelog()
     import feat_status
     await feat_status.startup_message()
     if "finance" in app.OPTIONAL:

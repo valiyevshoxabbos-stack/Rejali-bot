@@ -34,6 +34,8 @@ def build_text() -> str:
     sleeps = db.q1("SELECT COUNT(*) AS c FROM sleep_log WHERE duration_min IS NOT NULL")["c"]
     weights = db.q1("SELECT COUNT(*) AS c FROM weight_log")["c"]
     qazos = db.q1("SELECT COUNT(*) AS c FROM qazo WHERE status='open'")["c"]
+    ch_act = db.q1("SELECT COUNT(*) AS c FROM challenges WHERE status='active'")["c"]
+    fn_acc = db.q1("SELECT COUNT(*) AS c FROM finance_accounts WHERE is_active=1")["c"]
 
     vol_warn = ""
     if not _in_volume(p):
@@ -44,12 +46,12 @@ def build_text() -> str:
         f"{vol_warn}\n"
         f"Ishlash vaqti: {hours} s {rem // 60} daq\n"
         f"Baza: <code>{app.esc(p)}</code> ({size}, sxema v{db.schema_version()})\n"
-        f"Yozuvlar: 🎂 {bdays} · 📝 maxsus {custom} · 😴 {sleeps} · ⚖️ {weights} · 🕌 ochiq qazo {qazos}\n"
+        f"Yozuvlar: 🏆 chelenj {ch_act} · 💰 hisob {fn_acc} · 🎂 {bdays} · 📝 maxsus {custom} · 😴 {sleeps} · ⚖️ {weights} · 🕌 ochiq qazo {qazos}\n"
         f"Rejalashtirilgan ishlar: {len(app.scheduler.get_jobs())}\n"
         f"Shahar: {app.esc(sv.get_city())}\n"
         f"Oxirgi zaxira: {app.esc(last_backup)}\n"
         f"Pauza: {pause.strftime('%d.%m.%Y') + ' gacha' if pause and pause >= app.today() else 'yo‘q'}\n"
-        f"Ixtiyoriy funksiyalar: {', '.join(app.OPTIONAL) or 'hali yo‘q (3.1+)'}"
+        f"Ixtiyoriy funksiyalar: {', '.join(app.OPTIONAL) or 'hali yo‘q'}"
     )
 
 

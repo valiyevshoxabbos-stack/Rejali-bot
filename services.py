@@ -1,5 +1,6 @@
-"""AltronBek 3.0.1: biznes mantiq (Telegramga bog'liq emas, shuning uchun sinash oson)."""
+"""AltronBek 3.5: biznes mantiq (Telegramga bog'liq emas, shuning uchun sinash oson)."""
 
+import calendar
 import os
 from datetime import date, datetime, timedelta
 
@@ -21,6 +22,41 @@ MODE_NAME = {"required": "majburiy", "optional": "ixtiyoriy", "off": "o'chirilga
 def parse_hhmm(s: str):
     h, m = s.split(":")
     return int(h), int(m)
+
+
+def days_in_month(year: int, month: int) -> int:
+    """Oy ichidagi kunlar soni (28, 29, 30 yoki 31 — kabisa yili hisobga olingan)."""
+    return calendar.monthrange(year, month)[1]
+
+
+def clamp_day(year: int, month: int, day: int) -> date:
+    """28, 29, 30, 31 kunlik oylarda sanani oyning oxirgi kuniga xavfsiz moslaydi."""
+    safe_day = min(max(1, int(day)), days_in_month(year, month))
+    return date(year, month, safe_day)
+
+
+def add_months(d: date, months: int) -> date:
+    """Berilgan sanaga `months` oyni xavfsiz qo'shadi (31-yanvar + 1 oy -> 28/29-fevral)."""
+    try:
+        from dateutil.relativedelta import relativedelta  # ixtiyoriy
+        return d + relativedelta(months=months)
+    except ImportError:
+        total_m = (d.year * 12 + (d.month - 1)) + int(months)
+        ny, nm0 = divmod(total_m, 12)
+        return clamp_day(ny, nm0 + 1, d.day)
+
+
+def next_monthly_due_date(ref_today: date, due_day: int, skip_this_month: bool = False) -> date:
+    """
+    Har oyning `due_day` (1..31) kuniga to'g'ri keladigan keyingi sanani hisoblaydi.
+    `skip_this_month=True` bo'lsa (shu oy allaqachon to'langan bo'lsa), keyingi oyni qaytaradi.
+    """
+    if not skip_this_month:
+        cand = clamp_day(ref_today.year, ref_today.month, due_day)
+        if cand >= ref_today:
+            return cand
+    nxt_first = add_months(date(ref_today.year, ref_today.month, 1), 1)
+    return clamp_day(nxt_first.year, nxt_first.month, due_day)
 
 
 def get_city() -> str:

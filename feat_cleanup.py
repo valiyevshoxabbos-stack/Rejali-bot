@@ -1,14 +1,30 @@
-"""Xabarlarni tozalash: 🗑 tugmasi, avto-o'chirish sozlamalari, foydalanuvchi xabarini o'chirish, tiklash."""
+"""
+Xabarlarni tozalash (3.5 — In-place Edit Message UX):
+- 🗑 tugmasi, avto-o'chirish sozlamalari, foydalanuvchi xabarini o'chirish, tiklash.
+- Barcha menyu va tiklash amallari yangi xabar yubormasdan, mavjud xabarni tahrirlash (edit_text) orqali bajariladi.
+"""
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from apscheduler.triggers.interval import IntervalTrigger
 
 import app
+import db
 import messenger
 
 router = Router()
 HOME = InlineKeyboardButton(text="⬅️ Sozlamalar", callback_data="se:home")
+
+
+async def _edit_inplace(message, text: str, kb: InlineKeyboardMarkup | None):
+    markup = messenger.with_delete(kb)
+    try:
+        await message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e).lower():
+            app.log.warning(f"Tozalash oynasini tahrirlashda xato: {e}")
+    db.ex("UPDATE msg_log SET text = ? WHERE message_id = ? AND deleted_at IS NULL", (text, message.message_id))
 
 
 @router.callback_query(F.data == "del")
@@ -17,15 +33,15 @@ async def cb_delete(cb: CallbackQuery):
     if not res["ok"]:
         await cb.answer("Xabar 48 soatdan eski, Telegram o'chirishga ruxsat bermaydi.", show_alert=True)
         return
-    await cb.answer()
     if res.get("switched"):
         label = messenger.LABELS.get(res["category"], res["category"])
         pref = messenger.get_pref(res["category"])
-        await messenger.send(
-            f"ℹ️ «{label}» ko'p o'chirilgani uchun endi {messenger.delay_text(pref['delay_min'])}dan keyin "
-            "avtomatik o'chadi.\nQaytarish: Sozlamalar → Xabarlarni tozalash.",
-            "system", bind_trigger=False,
+        await cb.answer(
+            f"ℹ️ «{label}» ko'p o'chirilgani uchun endi {messenger.delay_text(pref['delay_min'])}dan keyin avto-o'chadi.",
+            show_alert=True,
         )
+        return
+    await cb.answer()
 
 
 def menu_text_kb():
@@ -57,7 +73,7 @@ def menu_text_kb():
 
 async def show_menu(cb: CallbackQuery):
     text, kb = menu_text_kb()
-    await cb.message.edit_text(text, reply_markup=messenger.with_delete(kb))
+    await _edit_inplace(cb.message, text, kb)
 
 
 @router.callback_query(F.data == "se:clean")
@@ -93,27 +109,42 @@ async def cb_delay(cb: CallbackQuery):
     await show_menu(cb)
 
 
-@router.callback_query(F.data == "cl:r")
-async def cb_restore_list(cb: CallbackQuery):
+def _restore_list_view():
     items = messenger.recent_deleted()
     if not items:
-        await cb.answer("Oxirgi 7 kunda o'chirilgan xabar yo'q", show_alert=True)
-        return
-    await cb.answer()
+        return (
+            "♻️ <b>Tiklash</b>\n\nOxirgi 7 kunda o'chirilgan xabar yo'q.",
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data="se:clean")]]),
+        )
     rows = []
-    lines = ["♻️ <b>Tiklash</b> (matn qayta yuboriladi; asl vaqt va tugmalar tiklanmaydi)\n"]
+    lines = ["♻️ <b>Tiklash</b> (tanlangan xabar shu oynaning o'zida ko'rsatiladi)\n"]
     for i, it in enumerate(items, 1):
         snippet = " ".join((it["text"] or "").replace("<b>", "").replace("</b>", "").split())[:40]
         lines.append(f"{i}. {app.esc(snippet)}")
         rows.append([InlineKeyboardButton(text=f"↩️ {i}", callback_data=f"cl:x:{it['id']}")])
     rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="se:clean")])
-    await cb.message.edit_text("\n".join(lines), reply_markup=messenger.with_delete(InlineKeyboardMarkup(inline_keyboard=rows)))
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "cl:r")
+async def cb_restore_list(cb: CallbackQuery):
+    await cb.answer()
+    text, kb = _restore_list_view()
+    await _edit_inplace(cb.message, text, kb)
 
 
 @router.callback_query(F.data.startswith("cl:x:"))
 async def cb_restore(cb: CallbackQuery):
-    ok = await messenger.restore(int(cb.data.split(":")[2]))
-    await cb.answer("Qayta yuborildi" if ok else "Tiklab bo'lmadi", show_alert=not ok)
+    restored_text = messenger.restore_inplace_data(int(cb.data.split(":")[2]))
+    if restored_text is None:
+        await cb.answer("Tiklab bo'lmadi", show_alert=True)
+        return
+    await cb.answer("Tiklandi")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Tiklash ro'yxati", callback_data="cl:r"),
+         InlineKeyboardButton(text="🧹 Tozalash", callback_data="se:clean")],
+    ])
+    await _edit_inplace(cb.message, f"♻️ <b>Tiklangan xabar:</b>\n\n{restored_text}", kb)
 
 
 def register_jobs(scheduler):

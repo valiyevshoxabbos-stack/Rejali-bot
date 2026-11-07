@@ -18,9 +18,10 @@ router = Router()
 
 HELP = (
     "Assalomu alaykum, Umarkhan!\n\n<b>AltronBek " + app.VERSION + "</b>\n"
-    "Pastdagi tugmalar orqali ishlang. Buyruqlar ham ishlaydi:\n"
-    "/bugun /qoshish /royxat /vaqt /ball /sinf /qazolar /statistika /vazn /uyqu /yotdim /uyqu_kiritish "
-    "/obhavo /balandlik /hisob /tkunlar /tugilgan /izoh /izohlar /shahar /tiklash /sozlamalar /holat /bekor"
+    "Pastdagi tugmalar orqali ishlang. Tezkor qayd uchun xabarni <code>!</code> bilan boshlang.\n"
+    "Buyruqlar:\n"
+    "/bugun /chelenjlar /moliya /qoshish /royxat /vaqt /ball /sinf /qazolar /statistika /vazn /uyqu /yotdim "
+    "/uyqu_kiritish /obhavo /balandlik /hisob /tkunlar /tugilgan /izoh /izohlar /shahar /tiklash /sozlamalar /holat /bekor"
 )
 
 
@@ -29,6 +30,7 @@ def add_menu_kb() -> InlineKeyboardMarkup:
         return InlineKeyboardButton(text=t, callback_data=d)
     return InlineKeyboardMarkup(inline_keyboard=[
         [b("📝 Eslatma", "add:rem"), b("🎂 Tug'ilgan kun", "add:bday")],
+        [b("🏆 Chelenj", "add:chl"), b("💰 Moliya", "add:fin")],
         [b("⚖️ Vazn", "add:weight"), b("📝 Izoh", "add:note")],
         [b("➕ Bajardim", "ql:list"), b("😴 Yotdim / Uyqu", "sl:menu")],
         [b("🎂 Ro'yxat", "bd:list"), b("📒 Izohlar", "nt:list")],
@@ -106,6 +108,16 @@ async def _optional_entry(message: Message, state: FSMContext, name: str, label:
         await messenger.send(f"ℹ️ «{label}» keyingi versiyada ({version}) qo'shiladi.", "info")
         return
     await mod.entry(message)
+
+
+@router.message(F.text == common.T_CHALLENGES)
+async def btn_challenges(message: Message, state: FSMContext):
+    await _optional_entry(message, state, "challenges", "Chelenjlar", "3.5")
+
+
+@router.message(F.text == common.T_FINANCE)
+async def btn_finance(message: Message, state: FSMContext):
+    await _optional_entry(message, state, "finance", "Moliya", "3.5")
 
 
 @router.message(F.text == common.T_CALC)

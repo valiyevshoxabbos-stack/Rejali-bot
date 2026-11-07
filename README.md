@@ -1,28 +1,30 @@
-# AltronBek 3.1
+# AltronBek 3.5
 
-## Yangilash tartibi (3.0.1 → 3.1, ma'lumotlarni saqlagan holda)
+## Yangilash tartibi (3.1 → 3.5, ma'lumotlarni 100% saqlagan holda)
 1. Telegramda botga kiring: **⚙️ Sozlamalar → 🗂 Ma'lumotlar → 📤 Zaxira nusxa** ni bosing va `.db` faylni saqlab oling.
 2. GitHub repo'da **Add file → Upload files** ni oching.
-3. Shu papkadagi **barcha fayllarni** (`bot.py`, `main.py`, `app.py`, `db.py`, `feat_*.py` va boshqalar — jami 29 ta yassi fayl) tanlab yuklang va **Commit changes** ni bosing.
+3. Shu papkadagi **barcha fayllarni** (`bot.py`, `main.py`, `app.py`, `db.py`, `feat_*.py` va boshqalar — jami 31 ta yassi fayl) tanlab yuklang va **Commit changes** ni bosing.
 4. Railway avtomatik qayta deploy qiladi (`python bot.py`).
 5. Bot ishga tushganda:
-   - Avval bazaning yangilanishdan oldingi avtomatik nusxasini (`altronbek.db.pre-v3.bak`) Telegramga yuboradi;
-   - Keyin **"🟢 AltronBek 3.1 ishga tushdi."** xabarini yuboradi.
-6. `/holat` buyrug'ini yuborib baza yo'li (`/data/altronbek.db`), sxema (`v3`) va barcha yozuvlar joyida ekanini tekshiring.
+   - Avval bazaning yangilanishdan oldingi avtomatik nusxasini (`altronbek.db.pre-v4.bak`) Telegramga yuboradi;
+   - **"🟢 AltronBek 3.5 ishga tushdi."** xabarini yuboradi;
+   - Ketidan **🔄 Moliyaviy holat tekshiruvi (Start-up sync)** oynasini (`[✅ To'g'ri]`, `[➕ Qo'shish]`, `[✏️ Tahrirlash]`) chiqaradi.
+6. `/holat` buyrug'ini yuborib baza yo'li (`/data/altronbek.db`), sxema (`v4`) va barcha yozuvlar joyida ekanini tekshiring.
 
-## 3.1 dagi yangiliklar
-- **Tungi uyqu oqimi soddalashtirildi (`feat_sleep.py`, `feat_reminders.py`, `jobs.py`):**
-  - 22:00 dan avval `/uyqu`, `/yotdim` yoki menyudan **«😴 Yotdim / Uyqu»** chaqirilsa, tungi uyqu xabari darhol faollashadi va 22:00 dagi APScheduler eslatmasi bekor qilinadi.
-  - **«😴 Uxladim / Yotdim»** bosilganda yangi xabar yuborilmasdan o'sha xabarning o'zi tahrirlanib **«☀️ Uyg'ondim»** tugmasiga aylanadi.
-  - Bomdodda alohida «Uyg'ondim» xabari yuborilmaydi — kechagi bitta xabardagi **«☀️ Uyg'ondim»** tugmasi bilan sikl yopiladi.
-- **Ob-havo moduli va kiyinish tavsiyasi (`feat_weather.py`, `services.py`, `feat_summary.py`):**
-  - Open-Meteo API (`elevation=582` Chirchiq uchun, CC BY 4.0 `"Open-Meteo.com"` yozuvi, 75 daqiqalik kesh, `timeout=5s`, `asyncio.to_thread`).
-  - `apparent_temperature` bo'yicha 5 pog'onali kiyim tavsiyasi, shamol `>= 15 km/soat` qo'lqop ogohlantirishi, `07:00–21:30` oynasida yog'in `>= 25%` soyabon eslatmasi, harorat farqi `>= 8°C` bo'lganda tonggi/kunduzgi kiyim ajratilishi.
-  - `06:30` va `21:45` kunlik xulosalarga hamda **«🌦 Ob-havo»** menyusiga ulandi.
-- **Xarajatlar kalkulyatori (`feat_calculator.py`, `db.py` sxema `v3`, `feat_stats.py`):**
-  - `sessions`, `expenses`, `expense_splits` jadvallari (`PRAGMA user_version = 3`).
-  - **🛒 Bozorlik:** `Kartoshka 5kg 25 Men` va kg/litr/dona narxlar dinamikasi (+ Statistika → Bozorlik).
-  - **🍽 Restoran / Choyxona:** umumiy + shaxsiy taomlar (`@Ism` yoki tugma orqali) + `% servis` mutanosib taqsimoti.
-  - **🚗 Safar / Umumiy fond:** ko'p kishilik xarajatlarni umumlashtirish.
-  - **⚡️ Tezkor bo'lish:** `450000 / 4` (menyudan ham, oddiy chatda ham ishlaydi).
-  - **Minglik qoidasi** (`25 → 25 000`, `400..999` chegara sonlarda tasdiq so'rash) va **100 so'mgacha yaxlitlash** (qoldiq eng ko'p to'laganga, minimal tranzaksiyali qarz yopish).
+## 3.5 dagi yangiliklar (0% Hardcode — 100% Dinamik CRUD)
+- **Universal Chelenj Dvigateli (`feat_challenges.py`, `scoring.py`, `db.py` sxema `v4`):**
+  - `challenges`, `challenge_tasks`, `challenge_logs`, `challenge_bonuses` jadvallari.
+  - Bot ichidan 1 vazifalik yoki ko'p vazifalik chelenj yaratish, tahrirlash, vazifa qo'shish va to'xtatish (FSM + inline).
+  - 4 xil vazifa turi: `binary` (Ha/Yo'q), `numeric` (sonli maqsad), `weekly_quota` (haftada N kun), `schedule` (`mon,wed,fri`).
+  - **Davomiylik qoidasi:** vazifa o'tkazib yuborilsa chelenj noldan boshlanmaydi va bekor bo'lmaydi — 30 kunlik hisob davom etadi, faqat o'sha kun «to'liq emas» deb qayd etiladi.
+  - Kunlik barcha vazifalar to'liq yopilganda `scoring.py` orqali bonus ball qo'shiladi; `21:45` kechki xulosa va `/chelenjlar` menyusiga inline boshqaruv paneli ulandi.
+- **Universal Moliya Tizimi (`feat_finance.py`, `db.py` sxema `v4`):**
+  - `finance_accounts`, `finance_debts`, `finance_loans`, `finance_recurring`, `finance_transactions` jadvallari.
+  - **Smart Lifecycle:** kredit to'langanda `remaining_debt` va `remaining_installments` kamayib, `<= 0` bo'lganda `status = 'paid'` bo'ladi va qayta eslatilmaydi; qarzlar `0` ga yetganda `status = 'settled'` bo'lib eslatmadan tushadi.
+  - **Davriy to'lovlar (Partial Payment):** masalan `8–15` sanalar oynasida oy davomida qisman to'lab boriladi (`paid_amount_this_month`), `target_amount` ga yetgach shu oy uchun to'xtaydi va yangi oyda avtomatik yangilanadi.
+  - **Xavfsiz eslatmalar va filtrlar:** kredit kartalar uchun har oyning `5, 7 va 8`-sanalarida (`8-sana 17:00 gacha`) qat'iy ogohlantirish; «Yaqin to'lovlar» blokida FAQAT `<= 3 kun` qolgan to'lovlar; Minglik qoidasi (`25 → 25 000`, `400..999` sonlarda tasdiq).
+  - **Start-up sync** va `06:30` tonggi xulosada Moliya bloki (`Naqd`, `Kartalarda (jami)`, `Haqlar`, `Yaqin to'lovlar ≤3 kun`).
+- **Qo'shimcha qulayliklar:**
+  - `!` bilan boshlangan xabarlar tezkor qayd sifatida `notes` jadvaliga tushadi va `21:45` kechki xulosada eslatiladi.
+  - `feat_cleanup.py` to'liq In-place UX (`edit_message_text`) rejimiga o'tkazildi.
+  - `services.py` da `28, 29, 30, 31` kunlik oylar uchun xavfsiz sanalar arifmetikasi (`add_months`, `clamp_day`, `next_monthly_due_date`).

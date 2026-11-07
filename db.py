@@ -210,7 +210,113 @@ CREATE TABLE expense_splits (
 );
 """
 
-MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3]
+# v4 (3.5): Universal Chelenj dvigateli va Universal Moliya tizimi jadvallari.
+MIGRATION_4 = """
+CREATE TABLE challenges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    duration_days INTEGER NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    bonus_points INTEGER NOT NULL DEFAULT 10,
+    status TEXT NOT NULL DEFAULT 'active' -- active | completed | cancelled
+);
+CREATE INDEX idx_challenges_status ON challenges(status);
+
+CREATE TABLE challenge_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    challenge_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    task_type TEXT NOT NULL,              -- binary | numeric | weekly_quota | schedule
+    target_value REAL NOT NULL DEFAULT 1,
+    unit TEXT NOT NULL DEFAULT '',
+    schedule_days TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX idx_ch_tasks_cid ON challenge_tasks(challenge_id);
+
+CREATE TABLE challenge_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    challenge_id INTEGER NOT NULL,
+    task_id INTEGER NOT NULL,
+    log_date TEXT NOT NULL,
+    value REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending', -- done | partial | pending
+    UNIQUE(task_id, log_date)
+);
+CREATE INDEX idx_ch_logs_cid_date ON challenge_logs(challenge_id, log_date);
+
+CREATE TABLE challenge_bonuses (
+    challenge_id INTEGER NOT NULL,
+    bonus_date TEXT NOT NULL,
+    points INTEGER NOT NULL DEFAULT 10,
+    PRIMARY KEY (challenge_id, bonus_date)
+);
+
+CREATE TABLE finance_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    last_4 TEXT,
+    type TEXT NOT NULL,                   -- cash | debit | credit
+    balance INTEGER NOT NULL DEFAULT 0,
+    credit_limit INTEGER NOT NULL DEFAULT 0,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    usage_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE finance_debts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_name TEXT NOT NULL,
+    amount INTEGER NOT NULL,              -- >0 haq (menga berishadi), <0 qarz (men beraman)
+    due_date TEXT,
+    note TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active' -- active | settled
+);
+CREATE INDEX idx_fin_debts_status ON finance_debts(status);
+
+CREATE TABLE finance_loans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    total_debt INTEGER NOT NULL,
+    remaining_debt INTEGER NOT NULL,
+    monthly_payment INTEGER NOT NULL,
+    due_day INTEGER NOT NULL,
+    grace_deadline_day INTEGER,
+    grace_deadline_time TEXT,
+    total_installments INTEGER NOT NULL DEFAULT 1,
+    remaining_installments INTEGER NOT NULL DEFAULT 1,
+    last_paid_month TEXT,
+    end_date TEXT,
+    status TEXT NOT NULL DEFAULT 'active' -- active | paid
+);
+CREATE INDEX idx_fin_loans_status ON finance_loans(status);
+
+CREATE TABLE finance_recurring (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    target_amount INTEGER NOT NULL,
+    paid_amount_this_month INTEGER NOT NULL DEFAULT 0,
+    due_start_day INTEGER NOT NULL,
+    due_end_day INTEGER NOT NULL,
+    last_paid_month TEXT,
+    current_month TEXT,
+    status TEXT NOT NULL DEFAULT 'active' -- active | paused
+);
+CREATE INDEX idx_fin_rec_status ON finance_recurring(status);
+
+CREATE TABLE finance_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_account_id INTEGER,
+    to_account_id INTEGER,
+    amount INTEGER NOT NULL,
+    category TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_fin_tx_created ON finance_transactions(created_at);
+"""
+
+MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4]
 
 REQUIRED_TABLES = (
     "settings", "reminders", "overrides", "checkpoints", "checkpoint_status",

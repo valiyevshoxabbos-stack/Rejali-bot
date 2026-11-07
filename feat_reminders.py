@@ -1,18 +1,18 @@
 """
-Eslatmalar (3.0.1):
+Eslatmalar (3.5):
 - Yuborish (izoh `note` bilan), tugmalar (bajardim/bajarmadim/kechiktirish/chek-point),
 - Kunlik jurnal bilan integratsiya (javob berilgan xabar o'rniga jurnal yangilanadi),
 - Ixtiyoriy rejim ("Boraman" bosilganda asosiy vaqtida eslatma),
-- Tezkor belgilash, /qoshish oqimi, /royxat, /vaqt, /ball, /sinf, /izoh va /izohlar.
+- Tezkor belgilash, /qoshish oqimi, /royxat, /vaqt, /ball, /sinf, /izoh, /izohlar va "!" tezkor qayd.
 """
 
 import re
 from datetime import date, datetime, timedelta
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.state import State, StatesGroup, default_state
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import app
@@ -729,10 +729,20 @@ def _notes_text_kb():
 async def cmd_note(message: Message):
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        await messenger.send("Format: <code>/izoh matn</code> (ko'rish: /izohlar)", "confirm")
+        await messenger.send("Format: <code>/izoh matn</code> yoki <code>! matn</code> (ko'rish: /izohlar)", "confirm")
         return
     _save_note(parts[1].strip())
     await messenger.send("📝 Izoh saqlandi.", "confirm")
+
+
+@router.message(StateFilter(default_state), F.text.startswith("!"))
+async def quick_bang_note(message: Message):
+    txt = (message.text or "")[1:].strip()
+    if not txt:
+        await messenger.send("Format: <code>! matn</code> (kechki 21:45 xulosada eslatiladi)", "confirm")
+        return
+    _save_note(txt)
+    await messenger.send(f"📌 Tezkor qayd saqlandi: <b>{app.esc(txt)}</b>", "confirm")
 
 
 @router.message(Command("izohlar"))

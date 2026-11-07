@@ -1,8 +1,8 @@
 """
-AltronBek 3.1: kirish nuqtasi (yassi tuzilma: feat_*.py).
+AltronBek 3.5: kirish nuqtasi (yassi tuzilma: feat_*.py).
 
 Asosiy modullar majburiy: yo'q bo'lsa bot ishga tushmaydi (xato darhol ko'rinadi).
-Ixtiyoriy modullar (feat_weather, feat_calculator ...) yo'q bo'lsa, menyu "keyingi versiyada" deb javob beradi.
+Ixtiyoriy modullar (feat_weather, feat_calculator, feat_challenges, feat_finance) mavjud bo'lsa avtomatik ulanadi.
 """
 
 import asyncio
@@ -23,10 +23,12 @@ CORE = [
     "menu", "reminders", "qazo", "sleep", "birthdays", "weight",
     "stats", "settings", "cleanup", "summary", "status", "restore",
 ]
-OPTIONAL = ["weather", "calculator"]
+OPTIONAL = ["weather", "calculator", "challenges", "finance"]
 
 COMMANDS = [
     ("bugun", "Bugungi reja"),
+    ("chelenjlar", "Chelenjlar paneli"),
+    ("moliya", "Moliya boshqaruvi"),
     ("obhavo", "Ob-havo va kiyim tavsiyasi"),
     ("hisob", "Xarajatlar kalkulyatori"),
     ("qoshish", "Yangi eslatma"),
@@ -151,6 +153,8 @@ async def amain():
         await _send_migration_backups(backups)
     import feat_status
     await feat_status.startup_message()
+    if "finance" in app.OPTIONAL:
+        await app.OPTIONAL["finance"].startup_sync()
     await app.dp.start_polling(app.bot)
 
 

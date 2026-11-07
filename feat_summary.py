@@ -10,6 +10,8 @@ from apscheduler.triggers.cron import CronTrigger
 import app
 import db
 import feat_birthdays as birthdays
+import feat_challenges as challenges
+import feat_finance as finance
 import feat_journal as journal
 import feat_weather as weather
 import messenger
@@ -63,6 +65,9 @@ def today_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="➕ Bajardim", callback_data="ql:list"),
         InlineKeyboardButton(text="🕌 Qazolar", callback_data="qz:list"),
     ], [
+        InlineKeyboardButton(text="🏆 Chelenjlar", callback_data="ch:home"),
+        InlineKeyboardButton(text="💰 Moliya", callback_data="fn:home"),
+    ], [
         InlineKeyboardButton(text="😴 Yotdim / Uyqu", callback_data="sl:menu"),
         InlineKeyboardButton(text="⏸ Pauza", callback_data="pz:open"),
     ]])
@@ -82,6 +87,7 @@ async def send_morning():
     d = app.today()
     text = "🌅 <b>Xayrli tong!</b>\n\n" + await build_today_text()
     text += await weather.morning_weather_section()
+    text += finance.morning_finance_section(d)
     bdays = birthdays.today_lines(d)
     if bdays:
         text += "\n\n" + "\n".join(bdays)
@@ -94,8 +100,8 @@ async def send_evening():
     now = app.now()
     ds = scoring.day_summary(d)
     lines = ["🌙 <b>Kun yakuni</b>\n"]
-    if ds["done"] or ds["bonus"]:
-        extra = f" (+{ds['bonus']} ixtiyoriy)" if ds["bonus"] else ""
+    if ds["done"] or ds["bonus"] or ds.get("challenge_points"):
+        extra = f" (+{ds['bonus']} bonus)" if ds["bonus"] else ""
         lines.append(f"✅ Bugun bajarildi: {ds['done']}/{ds['total']}{extra}, +{ds['points']} ball")
     left = db.q(
         "SELECT title, status FROM occurrences WHERE date = ? AND is_subtask = 0 AND is_optional = 0 "
@@ -108,8 +114,22 @@ async def send_evening():
         lines += [f"• {app.esc(r['title'])} — {names[r['status']]}" for r in left]
     if len(lines) == 1:
         lines.append("Bugun uchun yozuv yo'q.")
+
+    today_notes = db.q("SELECT text FROM notes WHERE date = ? ORDER BY id", (d.isoformat(),))
+    notes_block = ""
+    if today_notes:
+        notes_block = "\n\n📌 <b>Bugungi qaydlar:</b>\n" + "\n".join(
+            f"• {app.esc(n['text'])}" for n in today_notes
+        )
+
+    ch_text, ch_kb = challenges.evening_challenges_section_and_kb(d)
     tom_wx = await weather.evening_tomorrow_section()
-    await messenger.send("\n".join(lines) + tom_wx + qazo_block(), "summary", bind_trigger=False)
+    await messenger.send(
+        "\n".join(lines) + notes_block + ch_text + tom_wx + qazo_block(),
+        "summary",
+        ch_kb,
+        bind_trigger=False,
+    )
 
 
 def register_jobs(scheduler):

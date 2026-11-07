@@ -384,6 +384,17 @@ async def cb_csv(cb: CallbackQuery):
         "SELECT e.created_at, ss.name AS sname, ss.type AS stype, e.title, e.amount, e.payer, "
         "e.qty, e.unit, e.unit_price FROM expenses e LEFT JOIN sessions ss ON ss.id = e.session_id ORDER BY e.id"
     )
+    ch_rows = db.q(
+        "SELECT c.title AS ctitle, t.title AS ttitle, l.log_date, l.value, l.status "
+        "FROM challenge_logs l JOIN challenges c ON c.id = l.challenge_id "
+        "JOIN challenge_tasks t ON t.id = l.task_id ORDER BY l.log_date, l.id"
+    )
+    fn_rows = db.q(
+        "SELECT tx.created_at, tx.category, tx.amount, a1.name AS from_acc, a2.name AS to_acc, tx.note "
+        "FROM finance_transactions tx "
+        "LEFT JOIN finance_accounts a1 ON a1.id = tx.from_account_id "
+        "LEFT JOIN finance_accounts a2 ON a2.id = tx.to_account_id ORDER BY tx.id"
+    )
     files = [
         ("vazn.csv", ["vaqt", "kg", "asosiy"], [[r["at"], r["kg"], r["is_primary"]] for r in w]),
         ("tugilgan_kunlar.csv", ["ism", "kun", "oy", "yil"], [[r["name"], r["day"], r["month"], r["year"] or ""] for r in b]),
@@ -396,6 +407,11 @@ async def cb_csv(cb: CallbackQuery):
          [[r["created_at"], r["sname"] or "", r["stype"] or "", r["title"], r["amount"], r["payer"],
            r["qty"] if r["qty"] is not None else "", r["unit"] or "", r["unit_price"] if r["unit_price"] is not None else ""]
           for r in ex]),
+        ("chelenjlar.csv", ["sana", "chelenj", "vazifa", "qiymat", "holat"],
+         [[r["log_date"], r["ctitle"], r["ttitle"], r["value"], r["status"]] for r in ch_rows]),
+        ("moliya_amaliyotlar.csv", ["vaqt", "tur", "summa", "qayerdan", "qayerga", "izoh"],
+         [[r["created_at"], r["category"], r["amount"], r["from_acc"] or "", r["to_acc"] or "", r["note"] or ""]
+          for r in fn_rows]),
     ]
     for name, headers, rows in files:
         await app.bot.send_document(app.CHAT_ID, BufferedInputFile(_csv(headers, rows), filename=name),
@@ -427,11 +443,13 @@ async def process_wipe(message: Message, state: FSMContext):
         return
     for table in ("occurrences", "qazo", "notes", "checkpoint_status", "overrides", "sleep_log", "weight_log",
                   "birthdays", "birthday_notices", "msg_log", "cleanup_events", "checkpoints",
-                  "expense_splits", "expenses", "sessions"):
+                  "expense_splits", "expenses", "sessions",
+                  "challenge_bonuses", "challenge_logs", "challenge_tasks", "challenges",
+                  "finance_transactions", "finance_recurring", "finance_loans", "finance_debts", "finance_accounts"):
         db.ex(f"DELETE FROM {table}")
     db.ex("DELETE FROM reminders WHERE source = 'custom'")
     db.ex("UPDATE reminders SET mode = 'required', off_until = NULL")
-    db.ex("DELETE FROM settings WHERE key LIKE 'journal_%' OR key LIKE 'trg_%'")
+    db.ex("DELETE FROM settings WHERE key LIKE 'journal_%' OR key LIKE 'trg_%' OR key LIKE 'fwarn_%'")
     for key in ("pause_until", "weight_prompt_until", "weight_pending"):
         db.del_setting(key)
     await common.clear_prompts(state)

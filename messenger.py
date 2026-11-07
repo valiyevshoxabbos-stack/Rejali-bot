@@ -266,3 +266,12 @@ async def restore(log_id: int) -> bool:
         return False
     db.ex("UPDATE msg_log SET deleted_by = 'restored' WHERE id = ?", (log_id,))
     return True
+
+
+def restore_inplace_data(log_id: int) -> str | None:
+    """In-place tiklash uchun: matnni qaytaradi va yozuvni 'restored' deb belgilaydi."""
+    row = db.q1("SELECT * FROM msg_log WHERE id = ? AND deleted_by IN ('user','auto') AND text IS NOT NULL", (log_id,))
+    if not row:
+        return None
+    db.ex("UPDATE msg_log SET deleted_by = 'restored' WHERE id = ?", (log_id,))
+    return row["text"]

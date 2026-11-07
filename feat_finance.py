@@ -1,27 +1,38 @@
 """
-Universal Moliya Tizimi (3.5 — feat_finance.py):
-- Hech qanday oldindan qotirilgan (hardcode) karta, kredit, qarz yoki to'lov yo'q — 100% dinamik CRUD dvigateli.
-- 5 ta jadval: `finance_accounts`, `finance_debts`, `finance_loans`, `finance_recurring`, `finance_transactions`.
-- Smart Lifecycle:
-  * Kredit to'langanda `remaining_debt` va `remaining_installments` kamayadi; `<= 0` bo'lgach `status = 'paid'` bo'lib qayta eslatilmaydi.
-  * Qarzlar qisman yoki to'liq yopilganda qoldiq yangilanadi; `0` ga yetganda `status = 'settled'` bo'ladi va eslatilmaydi.
-  * Davriy to'lovlar (masalan 8–15 sanalar) oy davomida qisman to'lab boriladi (`paid_amount_this_month`), `target_amount` ga yetgach shu oy uchun to'xtaydi.
-- Kredit kartalar: har oyning 5, 7 va 8-sanalarida (8-sana 17:00 gacha) qat'iy ogohlantirish.
-- Yaqin to'lovlar: FAQAT keyingi `<= 3 kun` ichidagi to'lovlar ko'rsatiladi.
-- Minglik qoidasi (`< 1000` -> `* 1000`, `400..999` chegara sonlarda tasdiq so'rash).
-- Start-up sync (`[✅ To'g'ri]`, `[➕ Qo'shish]`, `[✏️ Tahrirlash]`) va 06:30 tonggi xulosa bloki.
+Universal Moliya Tizimi (3.5.1 — feat_finance.py):
+- 6 ta jadval: `finance_accounts`, `finance_categories`, `finance_debts`, `finance_loans`,
+  `finance_recurring`, `finance_transactions`.
+- Standart va tizimli kategoriyalar (`Oziq-ovqat/Bozorlik`, `Kredit to'lovi`, `Ijara/Kvartira`,
+  `Qarzni qaytarish`, `Qarz qaytishi` va b.) + dinamik CRUD (`[➕ Yangi kategoriya]`, `[⚙️ Tahrirlash]`).
+- Tizimli kategoriyalar integratsiyasi: Chiqim/Kirim ichidan turib aktiv kreditlar, oylik kvartira rejasi
+  hamda qarz/haqlar balansini avtomatik kamaytirish.
+- Tranzaksiyalar tarixi (`📜 Tarix`) va In-place sahifalash (`⬅️ Oldingi` / `Keyingi ➡️`).
+- Oxirgi amaliyotni 1 daqiqa ichida bekor qilish (`↩️ Bekor qilish` — Undo: tranzaksiyani o'chirib, hisob
+  hamda bog'langan kredit/ijara/qarz balansini 100% tiklaydi).
+- Har 90 kunda Avto-Arxiv (90 kundan eski tranzaksiya va chelenj loglarini JSON/CSV fayl qilib Telegramga
+  yuborish, o'chirish va `VACUUM;` bilan bazani fizik qisqartirish; karta/naqd balanslari daxlsiz qoladi).
 """
 
+import csv
+import io
+import json
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 import app
 import db
@@ -37,7 +48,35 @@ ACC_TYPE_LABELS = {
 }
 AMBIGUOUS_MIN = 400
 AMBIGUOUS_MAX = 999
+UNDO_WINDOW_SEC = 60
+HISTORY_PAGE_SIZE = 8
+ARCHIVE_DAYS = 90
+
 _AMT_RE = re.compile(r"^([+-]?\d+(?:[.,]\d+)?)([kK]|ming|[mM]|mln)?$", re.IGNORECASE)
+
+# (name, icon, system_key, is_system)
+SEED_EXPENSE_CATEGORIES = [
+    ("Oziq-ovqat/Bozorlik", "🛒", None, 0),
+    ("Kafe/Tushlik", "🍽", None, 0),
+    ("Yo'l/Transport", "🚕", None, 0),
+    ("Ilm/Ta'lim", "📚", None, 0),
+    ("Sport/Sog'liq", "🏋️", None, 0),
+    ("Kiyim", "👕", None, 0),
+    ("Ehson", "🤲", None, 0),
+    ("Kredit to'lovi", "🏦", "sys_loan", 1),
+    ("Ijara/Kvartira", "🏠", "sys_rent", 1),
+    ("Qarzni qaytarish", "🤝", "sys_debt_out", 1),
+    ("Boshqa", "📦", None, 0),
+]
+
+SEED_INCOME_CATEGORIES = [
+    ("Stipendiya", "🎓", None, 0),
+    ("Ish haqi (Maktab)", "🏫", None, 0),
+    ("Qo'shimcha ish", "💼", None, 0),
+    ("Oila", "👨‍👩‍👦", None, 0),
+    ("Qarz qaytishi", "🤝", "sys_debt_in", 1),
+    ("Boshqa", "📥", None, 0),
+]
 
 
 class FinFSM(StatesGroup):
@@ -52,6 +91,10 @@ class FinFSM(StatesGroup):
 
     tx_amount = State()
     tx_note = State()
+    tx_sys_amount = State()
+
+    cat_add = State()
+    cat_rename = State()
 
     debt_person = State()
     debt_dir = State()
@@ -84,6 +127,84 @@ def fmt_sum(n: int | float) -> str:
     return f"{sign}{abs(val):,}".replace(",", " ")
 
 
+# ------------------------------------------------------------------ Kategoriyalar (Seed va CRUD)
+
+def seed_finance_categories():
+    """Standart va tizimli kategoriyalarni bazaga bir marta (idempotent) yuklaydi."""
+    existing_cnt = db.q1("SELECT COUNT(*) AS c FROM finance_categories")["c"]
+    if db.get_setting("fin_cats_seeded") == "1" and existing_cnt > 0:
+        return
+    for name, icon, sys_key, is_sys in SEED_EXPENSE_CATEGORIES:
+        if sys_key:
+            exists = db.q1("SELECT id FROM finance_categories WHERE system_key = ?", (sys_key,))
+        else:
+            exists = db.q1("SELECT id FROM finance_categories WHERE type = 'expense' AND name = ?", (name,))
+        if not exists:
+            db.ins(
+                "INSERT INTO finance_categories (name, type, icon, system_key, is_system, is_default, is_active, usage_count) "
+                "VALUES (?,?,?,?,?,1,1,0)",
+                (name, "expense", icon, sys_key, is_sys),
+            )
+    for name, icon, sys_key, is_sys in SEED_INCOME_CATEGORIES:
+        if sys_key:
+            exists = db.q1("SELECT id FROM finance_categories WHERE system_key = ?", (sys_key,))
+        else:
+            exists = db.q1("SELECT id FROM finance_categories WHERE type = 'income' AND name = ?", (name,))
+        if not exists:
+            db.ins(
+                "INSERT INTO finance_categories (name, type, icon, system_key, is_system, is_default, is_active, usage_count) "
+                "VALUES (?,?,?,?,?,1,1,0)",
+                (name, "income", icon, sys_key, is_sys),
+            )
+    db.set_setting("fin_cats_seeded", "1")
+
+
+def list_categories(cat_type: str) -> list[dict]:
+    seed_finance_categories()
+    return db.q(
+        "SELECT * FROM finance_categories WHERE type = ? AND is_active = 1 "
+        "ORDER BY usage_count DESC, is_system DESC, id ASC",
+        (cat_type,),
+    )
+
+
+def parse_icon_and_name(raw: str, default_icon: str = "📌") -> tuple[str, str]:
+    s = (raw or "").strip()
+    if not s:
+        return default_icon, ""
+    parts = s.split(maxsplit=1)
+    if len(parts) == 2 and len(parts[0]) <= 4 and not any(ch.isalnum() for ch in parts[0]):
+        return parts[0], parts[1].strip()
+    return default_icon, s
+
+
+def create_category(name: str, cat_type: str, icon: str = "📌") -> int:
+    if cat_type not in ("expense", "income"):
+        raise ValueError("Kategoriya turi 'expense' yoki 'income' bo'lishi kerak")
+    return db.ins(
+        "INSERT INTO finance_categories (name, type, icon, system_key, is_system, is_default, is_active, usage_count) "
+        "VALUES (?,?,?,NULL,0,0,1,0)",
+        (name.strip(), cat_type, (icon or "📌").strip()),
+    )
+
+
+def update_category(cat_id: int, name: str, icon: str | None = None):
+    cat = db.q1("SELECT * FROM finance_categories WHERE id = ?", (cat_id,))
+    if not cat:
+        return
+    new_icon = (icon or cat["icon"] or "📌").strip()
+    db.ex("UPDATE finance_categories SET name = ?, icon = ? WHERE id = ?", (name.strip(), new_icon, cat_id))
+
+
+def delete_category(cat_id: int) -> bool:
+    """Faqat tizimli bo'lmagan (`is_system = 0`) kategoriyalarni o'chiradi (arxivlaydi)."""
+    cat = db.q1("SELECT * FROM finance_categories WHERE id = ?", (cat_id,))
+    if not cat or int(cat["is_system"]) == 1:
+        return False
+    db.ex("UPDATE finance_categories SET is_active = 0 WHERE id = ?", (cat_id,))
+    return True
+
+
 # ------------------------------------------------------------------ Minglik qoidasi va sanalar
 
 def parse_fin_amount(raw: str, allow_zero: bool = False) -> dict | None:
@@ -113,7 +234,7 @@ def parse_fin_amount(raw: str, allow_zero: bool = False) -> dict | None:
         return {"amount": int(round(val * 1_000)), "ambiguous": False, "raw_num": val}
     if val < 1000:
         amb = val.is_integer() and (AMBIGUOUS_MIN <= int(val) <= AMBIGUOUS_MAX)
-        return {"amount": int(round(val * 1_000)), "ambiguous": amb, "raw_num": int(val) if val.is_integer() else val}
+        return {"amount": int(round(val * 1000)), "ambiguous": amb, "raw_num": int(val) if val.is_integer() else val}
     return {"amount": int(round(val)), "ambiguous": False, "raw_num": val}
 
 
@@ -130,7 +251,7 @@ def _parse_optional_date(raw: str) -> str | None | bool:
     return False
 
 
-# ------------------------------------------------------------------ Biznes mantiq (CRUD va Smart Lifecycle)
+# ------------------------------------------------------------------ Biznes mantiq (CRUD, Smart Lifecycle va Undo)
 
 def credit_card_debt(acc: dict) -> int:
     """Kredit kartadagi joriy ishlatilgan qarz miqdori."""
@@ -174,6 +295,10 @@ def record_transaction(
     note: str = "",
     from_account_id: int | None = None,
     to_account_id: int | None = None,
+    category_id: int | None = None,
+    linked_kind: str | None = None,
+    linked_id: int | None = None,
+    undo_meta: dict | None = None,
 ) -> int:
     amt = abs(int(amount))
     if from_account_id:
@@ -186,11 +311,80 @@ def record_transaction(
             "UPDATE finance_accounts SET balance = balance + ?, usage_count = usage_count + 1 WHERE id = ?",
             (amt, to_account_id),
         )
+    if category_id:
+        db.ex("UPDATE finance_categories SET usage_count = usage_count + 1 WHERE id = ?", (category_id,))
+    meta_json = json.dumps(undo_meta, ensure_ascii=False) if undo_meta else None
     return db.ins(
-        "INSERT INTO finance_transactions (from_account_id, to_account_id, amount, category, note, created_at) "
-        "VALUES (?,?,?,?,?,?)",
-        (from_account_id, to_account_id, amt, category, note.strip(), app.now().isoformat()),
+        "INSERT INTO finance_transactions "
+        "(from_account_id, to_account_id, amount, category, note, created_at, category_id, linked_kind, linked_id, undo_meta) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            from_account_id, to_account_id, amt, category, note.strip(),
+            app.now().isoformat(), category_id, linked_kind, linked_id, meta_json,
+        ),
     )
+
+
+def undo_transaction(tx_id: int) -> dict:
+    """
+    Kiritilgan tranzaksiyani 1 daqiqa (60 soniya) ichida bekor qiladi:
+    - Tranzaksiyani `finance_transactions` dan o'chiradi;
+    - Karta/naqd balansini avvalgi holatiga qaytaradi;
+    - Tizimli kategoriya (kredit, kvartira, qarz/haq) orqali bajarilgan bo'lsa, o'sha ob'ekt qoldig'ini ham tiklaydi.
+    """
+    tx = db.q1("SELECT * FROM finance_transactions WHERE id = ?", (tx_id,))
+    if not tx:
+        return {"ok": False, "error": "Amaliyot topilmadi yoki allaqachon bekor qilingan."}
+    created = datetime.fromisoformat(tx["created_at"])
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=app.TZ)
+    age_sec = (app.now() - created).total_seconds()
+    if age_sec > UNDO_WINDOW_SEC:
+        return {"ok": False, "error": "Bekor qilish muddati (1 daqiqa) tugagan.", "expired": True}
+
+    amt = int(tx["amount"])
+    if tx.get("from_account_id"):
+        db.ex(
+            "UPDATE finance_accounts SET balance = balance + ?, usage_count = MAX(0, usage_count - 1) WHERE id = ?",
+            (amt, tx["from_account_id"]),
+        )
+    if tx.get("to_account_id"):
+        db.ex(
+            "UPDATE finance_accounts SET balance = balance - ?, usage_count = MAX(0, usage_count - 1) WHERE id = ?",
+            (amt, tx["to_account_id"]),
+        )
+    if tx.get("category_id"):
+        db.ex(
+            "UPDATE finance_categories SET usage_count = MAX(0, usage_count - 1) WHERE id = ?",
+            (tx["category_id"],),
+        )
+
+    l_kind = tx.get("linked_kind")
+    l_id = tx.get("linked_id")
+    if l_kind and l_id and tx.get("undo_meta"):
+        meta = json.loads(tx["undo_meta"])
+        if l_kind == "loan":
+            db.ex(
+                "UPDATE finance_loans SET remaining_debt = ?, remaining_installments = ?, "
+                "last_paid_month = ?, status = ? WHERE id = ?",
+                (meta["remaining_debt"], meta["remaining_installments"], meta.get("last_paid_month"), meta["status"], l_id),
+            )
+        elif l_kind == "recurring":
+            db.ex(
+                "UPDATE finance_recurring SET paid_amount_this_month = ?, last_paid_month = ?, current_month = ? WHERE id = ?",
+                (meta["paid_amount_this_month"], meta.get("last_paid_month"), meta.get("current_month"), l_id),
+            )
+        elif l_kind == "debt":
+            db.ex(
+                "UPDATE finance_debts SET amount = ?, status = ? WHERE id = ?",
+                (meta["amount"], meta["status"], l_id),
+            )
+
+    db.ex("DELETE FROM finance_transactions WHERE id = ?", (tx_id,))
+    job = app.scheduler.get_job(f"undo_exp_{tx_id}")
+    if job:
+        job.remove()
+    return {"ok": True, "amount": amt, "category": tx["category"]}
 
 
 def create_debt(person_name: str, amount: int, due_date: str | None = None, note: str = "") -> int:
@@ -203,7 +397,13 @@ def create_debt(person_name: str, amount: int, due_date: str | None = None, note
     )
 
 
-def settle_debt(debt_id: int, pay_amount: int | None = None, account_id: int | None = None) -> dict:
+def settle_debt(
+    debt_id: int,
+    pay_amount: int | None = None,
+    account_id: int | None = None,
+    category_id: int | None = None,
+    category_label: str | None = None,
+) -> dict:
     """
     Qarz yoki haqni qisman/to'liq yopadi.
     Qoldiq 0 ga yetganda `status = 'settled'` ga o'tadi va qayta eslatilmaydi.
@@ -215,20 +415,38 @@ def settle_debt(debt_id: int, pay_amount: int | None = None, account_id: int | N
     pay = abs(int(pay_amount)) if pay_amount is not None else abs(cur)
     pay = min(pay, abs(cur))
 
+    undo_meta = {"amount": cur, "status": d_row["status"]}
+    tx_id = None
     if cur > 0:
-        # Menga qaytarishdi (kirim)
         new_amt = cur - pay
         if account_id:
-            record_transaction(pay, "debt_in", f"Haq qaytdi: {d_row['person_name']}", to_account_id=account_id)
+            tx_id = record_transaction(
+                pay,
+                category_label or "🤝 Qarz qaytishi",
+                f"Haq qaytdi: {d_row['person_name']}",
+                to_account_id=account_id,
+                category_id=category_id,
+                linked_kind="debt",
+                linked_id=debt_id,
+                undo_meta=undo_meta,
+            )
     else:
-        # Men qaytardim (chiqim)
         new_amt = cur + pay
         if account_id:
-            record_transaction(pay, "debt_out", f"Qarz yopildi: {d_row['person_name']}", from_account_id=account_id)
+            tx_id = record_transaction(
+                pay,
+                category_label or "🤝 Qarzni qaytarish",
+                f"Qarz yopildi: {d_row['person_name']}",
+                from_account_id=account_id,
+                category_id=category_id,
+                linked_kind="debt",
+                linked_id=debt_id,
+                undo_meta=undo_meta,
+            )
 
     new_status = "settled" if new_amt == 0 else "active"
     db.ex("UPDATE finance_debts SET amount = ?, status = ? WHERE id = ?", (new_amt, new_status, debt_id))
-    return {"ok": True, "remaining": new_amt, "status": new_status, "paid": pay}
+    return {"ok": True, "remaining": new_amt, "status": new_status, "paid": pay, "tx_id": tx_id, "person": d_row["person_name"]}
 
 
 def create_loan(
@@ -267,6 +485,8 @@ def pay_loan(
     pay_amount: int | None = None,
     from_account_id: int | None = None,
     ref_today: date | None = None,
+    category_id: int | None = None,
+    category_label: str | None = None,
 ) -> dict:
     """
     Kredit to'lovi (Smart Lifecycle):
@@ -279,6 +499,14 @@ def pay_loan(
         return {"ok": False}
     d = ref_today or app.today()
     pay = abs(int(pay_amount)) if pay_amount is not None else min(int(loan["monthly_payment"]), int(loan["remaining_debt"]))
+
+    undo_meta = {
+        "remaining_debt": int(loan["remaining_debt"]),
+        "remaining_installments": int(loan["remaining_installments"]),
+        "last_paid_month": loan.get("last_paid_month"),
+        "status": loan["status"],
+    }
+
     new_rem_debt = max(0, int(loan["remaining_debt"]) - pay)
     new_rem_inst = max(0, int(loan["remaining_installments"]) - 1)
 
@@ -294,10 +522,19 @@ def pay_loan(
         "last_paid_month = ?, status = ? WHERE id = ?",
         (new_rem_debt, new_rem_inst, d.strftime("%Y-%m"), new_status, loan_id),
     )
+    tx_id = None
     if from_account_id and pay > 0:
-        record_transaction(pay, "loan_payment", f"Kredit: {loan['title']}", from_account_id=from_account_id)
+        tx_id = record_transaction(
+            pay,
+            category_label or "🏦 Kredit to'lovi",
+            f"Kredit: {loan['title']}",
+            from_account_id=from_account_id,
+            category_id=category_id,
+            linked_kind="loan",
+            linked_id=loan_id,
+            undo_meta=undo_meta,
+        )
 
-    # Rejalashtirilgan eslatma bo'lsa darhol olib tashlaymiz
     for job in list(app.scheduler.get_jobs()):
         if job.id.startswith(f"fin_loan_{loan_id}_"):
             job.remove()
@@ -308,6 +545,8 @@ def pay_loan(
         "remaining_debt": new_rem_debt,
         "remaining_installments": new_rem_inst,
         "status": new_status,
+        "tx_id": tx_id,
+        "title": loan["title"],
     }
 
 
@@ -337,6 +576,8 @@ def pay_recurring(
     pay_amount: int,
     from_account_id: int | None = None,
     ref_today: date | None = None,
+    category_id: int | None = None,
+    category_label: str | None = None,
 ) -> dict:
     """
     Davriy to'lovni qisman yoki to'liq yopish (Partial Payment):
@@ -350,6 +591,12 @@ def pay_recurring(
     if not rec:
         return {"ok": False}
 
+    undo_meta = {
+        "paid_amount_this_month": int(rec["paid_amount_this_month"]),
+        "last_paid_month": rec.get("last_paid_month"),
+        "current_month": rec.get("current_month"),
+    }
+
     pay = abs(int(pay_amount))
     new_paid = int(rec["paid_amount_this_month"]) + pay
     target = int(rec["target_amount"])
@@ -360,8 +607,18 @@ def pay_recurring(
         "UPDATE finance_recurring SET paid_amount_this_month = ?, last_paid_month = ?, current_month = ? WHERE id = ?",
         (new_paid, last_m, ym, rec_id),
     )
+    tx_id = None
     if from_account_id and pay > 0:
-        record_transaction(pay, "recurring_payment", f"Davriy: {rec['title']}", from_account_id=from_account_id)
+        tx_id = record_transaction(
+            pay,
+            category_label or "🏠 Ijara/Kvartira",
+            f"Davriy: {rec['title']}",
+            from_account_id=from_account_id,
+            category_id=category_id,
+            linked_kind="recurring",
+            linked_id=rec_id,
+            undo_meta=undo_meta,
+        )
 
     return {
         "ok": True,
@@ -369,6 +626,8 @@ def pay_recurring(
         "target_amount": target,
         "remaining_this_month": max(0, target - new_paid),
         "closed_this_month": closed_this_month,
+        "tx_id": tx_id,
+        "title": rec["title"],
     }
 
 
@@ -379,6 +638,97 @@ def toggle_recurring_pause(rec_id: int) -> str:
     new_st = "paused" if rec["status"] == "active" else "active"
     db.ex("UPDATE finance_recurring SET status = ? WHERE id = ?", (new_st, rec_id))
     return new_st
+
+
+# ------------------------------------------------------------------ Har 90 kunda Avto-Arxiv va VACUUM
+
+def _csv_bytes(headers: list[str], rows: list[list]) -> bytes:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(headers)
+    w.writerows(rows)
+    return buf.getvalue().encode("utf-8-sig")
+
+
+async def run_auto_archive_and_vacuum(cutoff_days: int = ARCHIVE_DAYS) -> dict:
+    """
+    90 kundan eski `finance_transactions` va `challenge_logs` yozuvlarini JSON hamda CSV fayl ko'rinishida
+    Telegramga zaxira qilib yuboradi, jadvaldan o'chiradi va `VACUUM;` bilan bazani fizik qisqartiradi.
+    Asosiy kartalar va naqd pul balansi (`finance_accounts`) daxlsiz saqlanadi!
+    """
+    cutoff_dt = (app.now() - timedelta(days=cutoff_days)).isoformat()
+    cutoff_date = (app.today() - timedelta(days=cutoff_days)).isoformat()
+
+    old_tx = db.q(
+        "SELECT tx.*, a1.name AS from_name, a2.name AS to_name "
+        "FROM finance_transactions tx "
+        "LEFT JOIN finance_accounts a1 ON a1.id = tx.from_account_id "
+        "LEFT JOIN finance_accounts a2 ON a2.id = tx.to_account_id "
+        "WHERE tx.created_at < ? ORDER BY tx.id",
+        (cutoff_dt,),
+    )
+    old_ch = db.q(
+        "SELECT l.*, c.title AS challenge_title, t.title AS task_title "
+        "FROM challenge_logs l "
+        "LEFT JOIN challenges c ON c.id = l.challenge_id "
+        "LEFT JOIN challenge_tasks t ON t.id = l.task_id "
+        "WHERE l.log_date < ? ORDER BY l.id",
+        (cutoff_date,),
+    )
+
+    if not old_tx and not old_ch:
+        return {"archived_tx": 0, "archived_ch_logs": 0, "vacuumed": False}
+
+    stamp = app.today().isoformat()
+    payload = {
+        "archived_at": app.now().isoformat(),
+        "cutoff_days": cutoff_days,
+        "finance_transactions": old_tx,
+        "challenge_logs": old_ch,
+    }
+    json_bytes = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+    # Avval Telegramga zaxira fayllarni yuboramiz (xato bo'lsa bazadan o'chirmaymiz!)
+    await app.bot.send_document(
+        app.CHAT_ID,
+        BufferedInputFile(json_bytes, filename=f"altronbek_arxiv_{stamp}.json"),
+        caption=(
+            f"📦 <b>Avto-Arxiv ({cutoff_days} kundan eski yozuvlar)</b>\n"
+            f"• Moliya tranzaksiyalari: {len(old_tx)} ta\n"
+            f"• Chelenj loglari: {len(old_ch)} ta"
+        ),
+    )
+    if old_tx:
+        tx_csv = _csv_bytes(
+            ["id", "vaqt", "summa", "kategoriya", "qayerdan", "qayerga", "izoh"],
+            [[r["id"], r["created_at"], r["amount"], r["category"], r["from_name"] or "", r["to_name"] or "", r["note"] or ""]
+             for r in old_tx],
+        )
+        await app.bot.send_document(
+            app.CHAT_ID,
+            BufferedInputFile(tx_csv, filename=f"arxiv_moliya_{stamp}.csv"),
+            caption=f"📜 Moliya arxivi (CSV): {len(old_tx)} qator",
+        )
+    if old_ch:
+        ch_csv = _csv_bytes(
+            ["id", "sana", "chelenj", "vazifa", "qiymat", "holat"],
+            [[r["id"], r["log_date"], r["challenge_title"] or "", r["task_title"] or "", r["value"], r["status"]]
+             for r in old_ch],
+        )
+        await app.bot.send_document(
+            app.CHAT_ID,
+            BufferedInputFile(ch_csv, filename=f"arxiv_chelenj_{stamp}.csv"),
+            caption=f"🏆 Chelenj loglari arxivi (CSV): {len(old_ch)} qator",
+        )
+
+    # Zaxira muvaffaqiyatli ketgach eski yozuvlarni o'chiramiz va fizik VACUUM qilamiz
+    if old_tx:
+        db.ex("DELETE FROM finance_transactions WHERE created_at < ?", (cutoff_dt,))
+    if old_ch:
+        db.ex("DELETE FROM challenge_logs WHERE log_date < ?", (cutoff_date,))
+    db.set_setting("last_archive", app.now().strftime("%d.%m.%Y %H:%M"))
+    db.vacuum()
+    return {"archived_tx": len(old_tx), "archived_ch_logs": len(old_ch), "vacuumed": True}
 
 
 # ------------------------------------------------------------------ Xulosa hisob-kitoblari va `<= 3 kun` filtri
@@ -413,7 +763,6 @@ def upcoming_payments(ref_today: date | None = None, max_days: int = 3) -> list[
     sync_recurring_months(d)
     items: list[dict] = []
 
-    # 1) Kredit kartalar (har oy 8-sana 17:00 muddati)
     for acc in db.q("SELECT * FROM finance_accounts WHERE is_active = 1 AND type = 'credit'"):
         c_debt = credit_card_debt(acc)
         if c_debt <= 0:
@@ -434,7 +783,6 @@ def upcoming_payments(ref_today: date | None = None, max_days: int = 3) -> list[
                 "deadline_note": "17:00 gacha",
             })
 
-    # 2) Kreditlar (`status = 'active'`)
     for ln in db.q("SELECT * FROM finance_loans WHERE status = 'active'"):
         if int(ln["remaining_debt"]) <= 0 or int(ln["remaining_installments"]) <= 0:
             continue
@@ -457,7 +805,6 @@ def upcoming_payments(ref_today: date | None = None, max_days: int = 3) -> list[
                 "deadline_note": f"{ln['grace_deadline_time']} gacha" if ln.get("grace_deadline_time") else "",
             })
 
-    # 3) Davriy to'lovlar (`status = 'active'`)
     for rc in db.q("SELECT * FROM finance_recurring WHERE status = 'active'"):
         rem = int(rc["target_amount"]) - int(rc["paid_amount_this_month"])
         paid_this_m = rem <= 0 or (rc.get("last_paid_month") == ym)
@@ -482,7 +829,6 @@ def upcoming_payments(ref_today: date | None = None, max_days: int = 3) -> list[
                 "deadline_note": f"{rc['due_start_day']}–{rc['due_end_day']} sanalar",
             })
 
-    # 4) Qarzlar (men berishim kerak, `amount < 0`, `status = 'active'`)
     for db_row in db.q("SELECT * FROM finance_debts WHERE status = 'active' AND amount < 0 AND due_date IS NOT NULL"):
         try:
             due_dt = date.fromisoformat(db_row["due_date"])
@@ -504,10 +850,9 @@ def upcoming_payments(ref_today: date | None = None, max_days: int = 3) -> list[
     return items
 
 
-# ------------------------------------------------------------------ Eslatmalar (5, 7, 8-sana 17:00 gacha va to'lovlar)
+# ------------------------------------------------------------------ Eslatmalar va APScheduler job'lari
 
 def _once_guard(key: str) -> bool:
-    """Shu hodisa bugun allaqachon yuborilgan bo'lsa False qaytaradi, aks holda belgilab True qaytaradi."""
     if db.get_setting(key):
         return False
     db.set_setting(key, "1")
@@ -515,12 +860,6 @@ def _once_guard(key: str) -> bool:
 
 
 async def check_finance_alerts(now_dt: datetime | None = None) -> int:
-    """
-    Moliyaviy muddatlarni tekshiradi va ogohlantirish yuboradi:
-    - Kredit kartalar: 5, 7 va 8-sanalarda (8-sanada qat'iy `17:00` gacha!).
-    - Faol kreditlar (`status='active'`), faol davriy to'lovlar (qisman qolganlari) va muddati kelgan qarzlar.
-    Yuborilgan xabarlar sonini qaytaradi.
-    """
     now_dt = now_dt or app.now()
     d = now_dt.date()
     d_iso = d.isoformat()
@@ -548,7 +887,7 @@ async def check_finance_alerts(now_dt: datetime | None = None) -> int:
             )
             sent_count += 1
 
-    # 2) Kreditlar (`status = 'active'` — `'paid'` bo'lsa bu yerga umuman kirmaydi!)
+    # 2) Kreditlar (`status = 'active'`)
     for ln in db.q("SELECT * FROM finance_loans WHERE status = 'active'"):
         if int(ln["remaining_debt"]) <= 0 or int(ln["remaining_installments"]) <= 0:
             continue
@@ -582,7 +921,7 @@ async def check_finance_alerts(now_dt: datetime | None = None) -> int:
                 )
                 sent_count += 1
 
-    # 3) Davriy to'lovlar (harakatli oyna ichida qisman qolgan bo'lsa)
+    # 3) Davriy to'lovlar
     for rc in db.q("SELECT * FROM finance_recurring WHERE status = 'active'"):
         rem = int(rc["target_amount"]) - int(rc["paid_amount_this_month"])
         if rem <= 0 or rc.get("last_paid_month") == ym:
@@ -604,12 +943,17 @@ async def check_finance_alerts(now_dt: datetime | None = None) -> int:
 def register_jobs(scheduler):
     scheduler.add_job(check_finance_alerts, CronTrigger(hour=9, minute=30), id="finance_am", replace_existing=True)
     scheduler.add_job(check_finance_alerts, CronTrigger(hour=15, minute=0), id="finance_pm", replace_existing=True)
+    scheduler.add_job(
+        run_auto_archive_and_vacuum,
+        IntervalTrigger(days=ARCHIVE_DAYS),
+        id="quarterly_archive",
+        replace_existing=True,
+    )
 
 
 # ------------------------------------------------------------------ 06:30 Xulosa va Start-up Sync
 
 def morning_finance_section(ref_today: date | None = None) -> str:
-    """06:30 ertalabki xulosa uchun ixcham Moliya bloki (Naqd, Kartalarda jami, Haqlar, Yaqin to'lovlar <=3 kun)."""
     ref_today = ref_today or app.today()
     tot = summary_totals()
     upc = upcoming_payments(ref_today, max_days=3)
@@ -654,7 +998,7 @@ def build_startup_sync_text_kb() -> tuple[str, InlineKeyboardMarkup]:
 
 
 async def startup_sync():
-    """Bot ishga tushganda joriy moliyaviy holatni tasdiqlash uchun yuboradi."""
+    seed_finance_categories()
     text, kb = build_startup_sync_text_kb()
     await messenger.send(text, "system", kb, actionable=True, bind_trigger=False)
 
@@ -683,6 +1027,18 @@ async def _edit_or_send(target_msg, text: str, kb: InlineKeyboardMarkup | None, 
     return sent.message_id if sent else None
 
 
+async def _edit_direct(mid: int | None, text: str, kb: InlineKeyboardMarkup) -> int | None:
+    if mid is not None:
+        try:
+            await app.bot.edit_message_text(text, chat_id=app.CHAT_ID, message_id=mid, reply_markup=messenger.with_delete(kb))
+            db.ex("UPDATE msg_log SET text = ? WHERE message_id = ? AND deleted_at IS NULL", (text, mid))
+            return mid
+        except Exception:
+            pass
+    sent = await messenger.send(text, "info", kb, bind_trigger=False)
+    return sent.message_id if sent else None
+
+
 def _ambiguous_kb(raw_num: int) -> InlineKeyboardMarkup:
     rows = [[btn(f"✅ {fmt_sum(raw_num * 1000)} so'm", f"fn:cf:{raw_num * 1000}")]]
     if raw_num % 10 == 0:
@@ -697,10 +1053,6 @@ async def _handle_amount_step(
     step_key: str,
     allow_zero: bool = False,
 ) -> int | None:
-    """
-    Summa qadamini tahlil qiladi. Chegara son (`500` kabi) bo'lsa `FinFSM.confirm_amount` ga o'tkazib
-    inline tasdiq so'raydi va `None` qaytaradi; aniq bo'lsa summani qaytaradi.
-    """
     parsed = parse_fin_amount(raw_text, allow_zero=allow_zero)
     if parsed is None:
         return None
@@ -714,13 +1066,14 @@ async def _handle_amount_step(
             _ambiguous_kb(raw_int),
             state,
         )
-        return -1  # tasdiq kutilmoqda
+        return -1
     return int(parsed["amount"])
 
 
-# ------------------------------------------------------------------ Asosiy ekranlar
+# ------------------------------------------------------------------ Asosiy ekranlar va «📜 Tarix» (Pagination)
 
 def home_view() -> tuple[str, InlineKeyboardMarkup]:
+    seed_finance_categories()
     tot = summary_totals()
     upc = upcoming_payments(app.today(), max_days=3)
     lines = [
@@ -749,8 +1102,72 @@ def home_view() -> tuple[str, InlineKeyboardMarkup]:
         [btn("➖ Chiqim", "fn:tx:exp"), btn("➕ Kirim", "fn:tx:inc"), btn("🔄 O'tkazma", "fn:tx:trf")],
         [btn("💳 Hisoblar", "fn:accs"), btn("🤝 Qarz / Haqlar", "fn:debts")],
         [btn("🏦 Kreditlar", "fn:loans"), btn("🏠 Davriy to'lovlar", "fn:recs")],
+        [btn("📜 Tarix", "fn:hist:0"), btn("🗂 Kategoriyalar", "fn:cmng:exp:home")],
     ])
     return "\n".join(lines), kb
+
+
+def history_view(page: int = 0, per_page: int = HISTORY_PAGE_SIZE) -> tuple[str, InlineKeyboardMarkup]:
+    """Tranzaksiyalar tarixi (oxirgi 7-10 tadan sahifalab ko'rsatish)."""
+    total = db.q1("SELECT COUNT(*) AS c FROM finance_transactions")["c"]
+    if total == 0:
+        return (
+            "📜 <b>Tranzaksiyalar tarixi</b>\n\nHozircha tranzaksiyalar yo'q.",
+            InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Moliya paneli", "fn:home")]]),
+        )
+    max_page = max(0, (total - 1) // per_page)
+    page = min(max(0, int(page)), max_page)
+    offset = page * per_page
+
+    rows_db = db.q(
+        "SELECT tx.*, a1.name AS from_name, a2.name AS to_name "
+        "FROM finance_transactions tx "
+        "LEFT JOIN finance_accounts a1 ON a1.id = tx.from_account_id "
+        "LEFT JOIN finance_accounts a2 ON a2.id = tx.to_account_id "
+        "ORDER BY tx.id DESC LIMIT ? OFFSET ?",
+        (per_page, offset),
+    )
+
+    lines = [f"📜 <b>Tranzaksiyalar tarixi</b> (sahifa {page + 1}/{max_page + 1}, jami {total} ta)\n"]
+    for r in rows_db:
+        try:
+            dt_s = datetime.fromisoformat(r["created_at"]).strftime("%d.%m %H:%M")
+        except ValueError:
+            dt_s = (r["created_at"] or "")[:16]
+
+        if r["from_account_id"] and r["to_account_id"]:
+            sign_s = f"🔄 <b>{fmt_sum(r['amount'])}</b>"
+            acc_s = f"{app.esc(r['from_name'] or '?')} → {app.esc(r['to_name'] or '?')}"
+        elif r["from_account_id"]:
+            sign_s = f"➖ <b>{fmt_sum(r['amount'])}</b>"
+            acc_s = app.esc(r["from_name"] or "?")
+        else:
+            sign_s = f"➕ <b>{fmt_sum(r['amount'])}</b>"
+            acc_s = app.esc(r["to_name"] or "?")
+
+        cat_s = app.esc(r["category"])
+        note_s = f" — <i>{app.esc(r['note'])}</i>" if r.get("note") else ""
+        lines.append(f"• <code>{dt_s}</code> {sign_s} so'm · {cat_s} [{acc_s}]{note_s}")
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(btn("⬅️ Oldingi", f"fn:hist:{page - 1}"))
+    if page < max_page:
+        nav_row.append(btn("Keyingi ➡️", f"fn:hist:{page + 1}"))
+    kb_rows = []
+    if nav_row:
+        kb_rows.append(nav_row)
+    kb_rows.append([btn("⬅️ Moliya paneli", "fn:home")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+@router.callback_query(F.data.startswith("fn:hist:"))
+async def cb_history(cb: CallbackQuery, state: FSMContext):
+    page = int(cb.data.split(":")[2])
+    await cb.answer()
+    await state.clear()
+    text, kb = history_view(page)
+    await _edit_or_send(cb.message, text, kb)
 
 
 def add_hub_view() -> tuple[str, InlineKeyboardMarkup]:
@@ -806,6 +1223,64 @@ async def cb_home(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     text, kb = home_view()
     await _edit_or_send(cb.message, text, kb)
+
+
+# ------------------------------------------------------------------ Undo tasdiq xabari va `fn:undo:<tx_id>`
+
+def _tx_confirm_kb(tx_id: int | None, with_undo: bool = True) -> InlineKeyboardMarkup:
+    rows = []
+    if with_undo and tx_id is not None:
+        rows.append([btn("↩️ Bekor qilish (1 daq)", f"fn:undo:{tx_id}")])
+    rows.append([btn("💰 Moliya paneli", "fn:home"), btn("📜 Tarix", "fn:hist:0")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def expire_undo_markup(msg_id: int, tx_id: int):
+    """1 daqiqa o'tgach tasdiq xabaridan «↩️ Bekor qilish» tugmasini olib tashlaydi."""
+    try:
+        await app.bot.edit_message_reply_markup(
+            chat_id=app.CHAT_ID,
+            message_id=msg_id,
+            reply_markup=messenger.with_delete(_tx_confirm_kb(tx_id, with_undo=False)),
+        )
+    except Exception:
+        pass
+
+
+async def _show_tx_confirmation(p_mid: int | None, summary_html: str, tx_id: int | None):
+    kb = _tx_confirm_kb(tx_id, with_undo=(tx_id is not None))
+    mid = await _edit_direct(p_mid, summary_html, kb)
+    if mid is not None and tx_id is not None:
+        app.schedule_job(
+            app.now() + timedelta(seconds=UNDO_WINDOW_SEC),
+            expire_undo_markup,
+            [mid, tx_id],
+            f"undo_exp_{tx_id}",
+        )
+
+
+@router.callback_query(F.data.startswith("fn:undo:"))
+async def cb_undo_tx(cb: CallbackQuery, state: FSMContext):
+    tx_id = int(cb.data.split(":")[2])
+    res = undo_transaction(tx_id)
+    if not res["ok"]:
+        await cb.answer(res["error"], show_alert=True)
+        if res.get("expired"):
+            try:
+                await cb.message.edit_reply_markup(
+                    reply_markup=messenger.with_delete(_tx_confirm_kb(tx_id, with_undo=False))
+                )
+            except Exception:
+                pass
+        return
+    await state.clear()
+    await cb.answer("↩️ Amaliyot bekor qilindi!")
+    text, kb = home_view()
+    banner = (
+        f"↩️ <b>Amaliyot bekor qilindi:</b> {fmt_sum(res['amount'])} so'm ({app.esc(res['category'])}) — "
+        "balans avvalgi holatiga qaytarildi.\n\n"
+    )
+    await _edit_or_send(cb.message, banner + text, kb)
 
 
 # ------------------------------------------------------------------ 1) Hisoblar (`finance_accounts`) CRUD
@@ -944,7 +1419,7 @@ async def _finish_acc_balance(state: FSMContext, amt: int):
     p_mid = data.get("panel_mid")
     await state.clear()
     text, kb = _accounts_view()
-    await _edit_or_send(None, text, kb) if not p_mid else await _edit_direct(p_mid, text, kb)
+    await _edit_direct(p_mid, text, kb)
 
 
 @router.message(FinFSM.acc_limit)
@@ -1015,7 +1490,164 @@ async def cb_acc_del(cb: CallbackQuery):
     await _edit_or_send(cb.message, text, kb)
 
 
-# ------------------------------------------------------------------ 2) Amaliyotlar (`finance_transactions`)
+# ------------------------------------------------------------------ 2) Kategoriyalar va Amaliyotlar (`finance_transactions`)
+
+def _category_picker_view(cat_type: str, acc_name: str) -> tuple[str, InlineKeyboardMarkup]:
+    short_t = "exp" if cat_type == "expense" else "inc"
+    cats = list_categories(cat_type)
+    rows, pair = [], []
+    for c in cats:
+        pair.append(btn(f"{c['icon']} {c['name'][:18]}", f"fn:txc:{c['id']}"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    rows.append([btn("➕ Yangi kategoriya", f"fn:cnew:{short_t}:tx"), btn("⚙️ Tahrirlash", f"fn:cmng:{short_t}:tx")])
+    rows.append([btn("⬅️ Bekor", "fn:home")])
+    hdr = "➖ Chiqim kategoriyasini tanlang" if cat_type == "expense" else "➕ Kirim kategoriyasini tanlang"
+    return f"<b>{hdr}</b>\nHisob: <b>{app.esc(acc_name)}</b>", InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _category_manage_view(short_t: str, origin: str) -> tuple[str, InlineKeyboardMarkup]:
+    cat_type = "expense" if short_t == "exp" else "income"
+    other_t = "inc" if short_t == "exp" else "exp"
+    cats = list_categories(cat_type)
+    title_t = "Chiqim kategoriyalari" if cat_type == "expense" else "Kirim kategoriyalari"
+    lines = [f"🗂 <b>{title_t}</b> (🔒 tizimli — o'chirilmaydi)\n"]
+    rows = [
+        [
+            btn(f"{'• ' if short_t == 'exp' else ''}➖ Chiqim", f"fn:cmng:exp:{origin}"),
+            btn(f"{'• ' if short_t == 'inc' else ''}➕ Kirim", f"fn:cmng:inc:{origin}"),
+        ]
+    ]
+    for c in cats:
+        sys_mark = " 🔒" if int(c["is_system"]) else ""
+        lines.append(f"• {c['icon']} <b>{app.esc(c['name'])}</b>{sys_mark} ({c['usage_count']} marta)")
+        r = [btn(f"✏️ {c['icon']} {c['name'][:16]}", f"fn:cren:{c['id']}:{short_t}:{origin}")]
+        if not int(c["is_system"]):
+            r.append(btn("🗑", f"fn:cdel:{c['id']}:{short_t}:{origin}"))
+        rows.append(r)
+    rows.append([btn("➕ Yangi kategoriya", f"fn:cnew:{short_t}:{origin}")])
+    back_cb = "fn:txbackcat" if origin == "tx" else "fn:home"
+    rows.append([btn("⬅️ Orqaga", back_cb)])
+    _ = other_t
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("fn:cmng:"))
+async def cb_cat_manage(cb: CallbackQuery, state: FSMContext):
+    _, _, short_t, origin = cb.data.split(":")
+    await cb.answer()
+    text, kb = _category_manage_view(short_t, origin)
+    await _edit_or_send(cb.message, text, kb, state)
+
+
+@router.callback_query(F.data == "fn:txbackcat")
+async def cb_tx_back_to_cat(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    data = await state.get_data()
+    mode = data.get("tx_mode")
+    aid = data.get("from_acc") or data.get("to_acc")
+    acc = db.q1("SELECT * FROM finance_accounts WHERE id = ?", (aid,)) if aid else None
+    if not acc or mode not in ("exp", "inc"):
+        text, kb = home_view()
+        await _edit_or_send(cb.message, text, kb)
+        return
+    cat_type = "expense" if mode == "exp" else "income"
+    text, kb = _category_picker_view(cat_type, acc["name"])
+    await _edit_or_send(cb.message, text, kb, state)
+
+
+@router.callback_query(F.data.startswith("fn:cnew:"))
+async def cb_cat_new(cb: CallbackQuery, state: FSMContext):
+    _, _, short_t, origin = cb.data.split(":")
+    await cb.answer()
+    await state.set_state(FinFSM.cat_add)
+    await state.update_data(cat_short=short_t, cat_origin=origin, panel_mid=cb.message.message_id)
+    back_cb = "fn:txbackcat" if origin == "tx" else f"fn:cmng:{short_t}:{origin}"
+    await _edit_or_send(
+        cb.message,
+        "➕ <b>Yangi kategoriya</b>\n\nIkonka va nomini yozing (masalan: <code>☕ Qahva</code> yoki <code>Texnika</code>):",
+        InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Bekor", back_cb)]]),
+        state,
+    )
+
+
+@router.message(FinFSM.cat_add)
+async def msg_cat_add(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    await messenger.delete_user_quiet(message.message_id)
+    data = await state.get_data()
+    short_t = data.get("cat_short", "exp")
+    origin = data.get("cat_origin", "home")
+    icon, name = parse_icon_and_name(raw, "📌")
+    if not name:
+        return
+    cat_type = "expense" if short_t == "exp" else "income"
+    create_category(name, cat_type, icon)
+    p_mid = data.get("panel_mid")
+    if origin == "tx":
+        aid = data.get("from_acc") or data.get("to_acc")
+        acc = db.q1("SELECT * FROM finance_accounts WHERE id = ?", (aid,)) if aid else None
+        if acc:
+            await state.set_state(None)
+            text, kb = _category_picker_view(cat_type, acc["name"])
+            await _edit_direct(p_mid, text, kb)
+            return
+    await state.clear()
+    text, kb = _category_manage_view(short_t, "home")
+    await _edit_direct(p_mid, text, kb)
+
+
+@router.callback_query(F.data.startswith("fn:cren:"))
+async def cb_cat_rename(cb: CallbackQuery, state: FSMContext):
+    _, _, cid_s, short_t, origin = cb.data.split(":")
+    cid = int(cid_s)
+    cat = db.q1("SELECT * FROM finance_categories WHERE id = ?", (cid,))
+    if not cat:
+        await cb.answer("Topilmadi")
+        return
+    await cb.answer()
+    await state.set_state(FinFSM.cat_rename)
+    await state.update_data(edit_cat_id=cid, cat_short=short_t, cat_origin=origin, panel_mid=cb.message.message_id)
+    await _edit_or_send(
+        cb.message,
+        f"✏️ <b>{cat['icon']} {app.esc(cat['name'])}</b> — yangi ikonka va nomni yozing:",
+        InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Bekor", f"fn:cmng:{short_t}:{origin}")]]),
+        state,
+    )
+
+
+@router.message(FinFSM.cat_rename)
+async def msg_cat_rename(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    await messenger.delete_user_quiet(message.message_id)
+    data = await state.get_data()
+    cat = db.q1("SELECT * FROM finance_categories WHERE id = ?", (data["edit_cat_id"],))
+    if cat and raw:
+        icon, name = parse_icon_and_name(raw, cat["icon"])
+        if name:
+            update_category(cat["id"], name, icon)
+    short_t = data.get("cat_short", "exp")
+    origin = data.get("cat_origin", "home")
+    p_mid = data.get("panel_mid")
+    if origin != "tx":
+        await state.clear()
+    else:
+        await state.set_state(None)
+    text, kb = _category_manage_view(short_t, origin)
+    await _edit_direct(p_mid, text, kb)
+
+
+@router.callback_query(F.data.startswith("fn:cdel:"))
+async def cb_cat_delete(cb: CallbackQuery, state: FSMContext):
+    _, _, cid_s, short_t, origin = cb.data.split(":")
+    ok = delete_category(int(cid_s))
+    await cb.answer("Kategoriya o'chirildi" if ok else "Tizimli kategoriyani o'chirib bo'lmaydi", show_alert=not ok)
+    text, kb = _category_manage_view(short_t, origin)
+    await _edit_or_send(cb.message, text, kb, state)
+
 
 @router.callback_query(F.data.startswith("fn:tx:"))
 async def cb_tx_start(cb: CallbackQuery, state: FSMContext):
@@ -1036,27 +1668,260 @@ async def cb_tx_start(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("fn:txa1:"))
 async def cb_tx_acc1(cb: CallbackQuery, state: FSMContext):
     aid = int(cb.data.split(":")[2])
+    acc = db.q1("SELECT * FROM finance_accounts WHERE id = ?", (aid,))
+    if not acc:
+        await cb.answer("Hisob topilmadi")
+        return
     data = await state.get_data()
     mode = data.get("tx_mode", "exp")
     await cb.answer()
     if mode == "trf":
-        await state.update_data(from_acc=aid)
+        await state.update_data(from_acc=aid, cat_id=None, cat_label="🔄 O'tkazma")
         accs = db.q("SELECT * FROM finance_accounts WHERE is_active = 1 AND id != ? ORDER BY usage_count DESC, id ASC", (aid,))
         rows = [[btn(f"➡️ {a['name'][:20]} ({fmt_sum(a['balance'])})", f"fn:txa2:{a['id']}")] for a in accs]
         rows.append([btn("⬅️ Bekor", "fn:home")])
         await _edit_or_send(cb.message, "<b>🔄 Qaysi hisobga o'tkazamiz?</b>", InlineKeyboardMarkup(inline_keyboard=rows), state)
         return
+
     if mode == "exp":
         await state.update_data(from_acc=aid, to_acc=None)
+        text, kb = _category_picker_view("expense", acc["name"])
     else:
         await state.update_data(from_acc=None, to_acc=aid)
+        text, kb = _category_picker_view("income", acc["name"])
+    await _edit_or_send(cb.message, text, kb, state)
+
+
+@router.callback_query(F.data.startswith("fn:txc:"))
+async def cb_tx_pick_category(cb: CallbackQuery, state: FSMContext):
+    cid = int(cb.data.split(":")[2])
+    cat = db.q1("SELECT * FROM finance_categories WHERE id = ?", (cid,))
+    if not cat:
+        await cb.answer("Kategoriya topilmadi")
+        return
+    await cb.answer()
+    cat_label = f"{cat['icon']} {cat['name']}"
+    sys_key = cat.get("system_key")
+    await state.update_data(cat_id=cid, cat_label=cat_label, sys_key=sys_key)
+
+    # 1) Tizimli: 🏦 Kredit to'lovi
+    if sys_key == "sys_loan":
+        loans = db.q("SELECT * FROM finance_loans WHERE status = 'active' ORDER BY id")
+        if not loans:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [btn("➕ Yangi kredit qo'shish", "fn:lnew")],
+                [btn("⬅️ Orqaga", "fn:txbackcat")],
+            ])
+            await _edit_or_send(cb.message, "🏦 Faol kreditlar topilmadi.", kb, state)
+            return
+        rows = [
+            [btn(f"🏦 {ln['title'][:18]} ({fmt_sum(min(ln['monthly_payment'], ln['remaining_debt']))})", f"fn:txln:{ln['id']}")]
+            for ln in loans
+        ]
+        rows.append([btn("⬅️ Orqaga", "fn:txbackcat")])
+        await _edit_or_send(cb.message, "🏦 <b>Qaysi kredit uchun to'lov qilamiz?</b>", InlineKeyboardMarkup(inline_keyboard=rows), state)
+        return
+
+    # 2) Tizimli: 🏠 Ijara/Kvartira
+    if sys_key == "sys_rent":
+        sync_recurring_months()
+        recs = db.q("SELECT * FROM finance_recurring WHERE status = 'active' ORDER BY id")
+        if not recs:
+            # Foydalanuvchi oldin ochmagan bo'lsa ham 500 000 so'mlik oylik rejani avto-tayyorlaymiz
+            new_rid = create_recurring("Ijara/Kvartira", 500_000, 8, 15)
+            recs = db.q("SELECT * FROM finance_recurring WHERE id = ?", (new_rid,))
+        if len(recs) == 1:
+            await _prompt_sys_recurring_amount(cb.message, state, recs[0])
+            return
+        rows = [
+            [btn(f"🏠 {r['title'][:18]} (qoldi: {fmt_sum(max(0, r['target_amount'] - r['paid_amount_this_month']))})", f"fn:txrc:{r['id']}")]
+            for r in recs
+        ]
+        rows.append([btn("⬅️ Orqaga", "fn:txbackcat")])
+        await _edit_or_send(cb.message, "🏠 <b>Qaysi oylik to'lovni yopamiz?</b>", InlineKeyboardMarkup(inline_keyboard=rows), state)
+        return
+
+    # 3) Tizimli: 🤝 Qarzni qaytarish (men berishim kerak, amount < 0) yoki 🤝 Qarz qaytishi (menga berishadi, amount > 0)
+    if sys_key in ("sys_debt_out", "sys_debt_in"):
+        cond = "amount < 0" if sys_key == "sys_debt_out" else "amount > 0"
+        debts = db.q(f"SELECT * FROM finance_debts WHERE status = 'active' AND {cond} ORDER BY id")
+        if not debts:
+            empty_msg = (
+                "🤝 Hozir siz qaytarishingiz kerak bo'lgan faol qarz yo'q."
+                if sys_key == "sys_debt_out"
+                else "🤝 Hozir sizga qaytarilishi kerak bo'lgan faol haq yo'q."
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [btn("➕ Yangi qarz / haq", "fn:dnew")],
+                [btn("⬅️ Orqaga", "fn:txbackcat")],
+            ])
+            await _edit_or_send(cb.message, empty_msg, kb, state)
+            return
+        icon_d = "📤" if sys_key == "sys_debt_out" else "📥"
+        rows = [
+            [btn(f"{icon_d} {d_r['person_name'][:18]} ({fmt_sum(abs(d_r['amount']))})", f"fn:txdb:{d_r['id']}")]
+            for d_r in debts
+        ]
+        rows.append([btn("⬅️ Orqaga", "fn:txbackcat")])
+        hdr = "🤝 <b>Kimga qarz qaytaryapsiz?</b>" if sys_key == "sys_debt_out" else "🤝 <b>Kimdan haq qaytdi?</b>"
+        await _edit_or_send(cb.message, hdr, InlineKeyboardMarkup(inline_keyboard=rows), state)
+        return
+
+    # 4) Oddiy kategoriya
     await state.set_state(FinFSM.tx_amount)
     await _edit_or_send(
         cb.message,
-        "💰 Summani yozing (masalan: <code>45</code> -> 45 000):",
-        InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Bekor", "fn:home")]]),
+        f"{cat_label}\n💰 Summani yozing (masalan: <code>45</code> -> 45 000):",
+        InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Orqaga", "fn:txbackcat")]]),
         state,
     )
+
+
+@router.callback_query(F.data.startswith("fn:txln:"))
+async def cb_tx_pick_loan(cb: CallbackQuery, state: FSMContext):
+    lid = int(cb.data.split(":")[2])
+    ln = db.q1("SELECT * FROM finance_loans WHERE id = ? AND status = 'active'", (lid,))
+    if not ln:
+        await cb.answer("Kredit topilmadi")
+        return
+    await cb.answer()
+    std_amt = min(int(ln["monthly_payment"]), int(ln["remaining_debt"]))
+    await state.set_state(FinFSM.tx_sys_amount)
+    await state.update_data(sys_target_id=lid, sys_std_amt=std_amt)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn(f"✅ Oylik to'lov ({fmt_sum(std_amt)} so'm)", "fn:txsok")],
+        [btn("⬅️ Orqaga", "fn:txbackcat")],
+    ])
+    await _edit_or_send(
+        cb.message,
+        f"🏦 <b>{app.esc(ln['title'])}</b>\n"
+        f"Qoldiq: <b>{fmt_sum(ln['remaining_debt'])} so'm</b> ({ln['remaining_installments']} oy)\n\n"
+        "Tugmani bosing yoki to'langan summani yozing:",
+        kb,
+        state,
+    )
+
+
+async def _prompt_sys_recurring_amount(target_msg, state: FSMContext, rec: dict):
+    rem = max(0, int(rec["target_amount"]) - int(rec["paid_amount_this_month"]))
+    std_amt = rem if rem > 0 else int(rec["target_amount"])
+    await state.set_state(FinFSM.tx_sys_amount)
+    await state.update_data(sys_target_id=rec["id"], sys_std_amt=std_amt)
+    kb_rows = []
+    if rem > 0:
+        kb_rows.append([btn(f"✅ Qoldiqni to'lash ({fmt_sum(rem)} so'm)", "fn:txsok")])
+    kb_rows.append([btn("⬅️ Orqaga", "fn:txbackcat")])
+    await _edit_or_send(
+        target_msg,
+        f"🏠 <b>{app.esc(rec['title'])}</b>\n"
+        f"Shu oy to'langan: <b>{fmt_sum(rec['paid_amount_this_month'])} / {fmt_sum(rec['target_amount'])} so'm</b>\n"
+        f"Qolgan: <b>{fmt_sum(rem)} so'm</b>\n\n"
+        "To'langan summani yozing yoki tugmani bosing:",
+        InlineKeyboardMarkup(inline_keyboard=kb_rows),
+        state,
+    )
+
+
+@router.callback_query(F.data.startswith("fn:txrc:"))
+async def cb_tx_pick_rec(cb: CallbackQuery, state: FSMContext):
+    rid = int(cb.data.split(":")[2])
+    rec = db.q1("SELECT * FROM finance_recurring WHERE id = ?", (rid,))
+    if not rec:
+        await cb.answer("Topilmadi")
+        return
+    await cb.answer()
+    await _prompt_sys_recurring_amount(cb.message, state, rec)
+
+
+@router.callback_query(F.data.startswith("fn:txdb:"))
+async def cb_tx_pick_debt(cb: CallbackQuery, state: FSMContext):
+    did = int(cb.data.split(":")[2])
+    d_row = db.q1("SELECT * FROM finance_debts WHERE id = ? AND status = 'active'", (did,))
+    if not d_row:
+        await cb.answer("Topilmadi")
+        return
+    await cb.answer()
+    full_amt = abs(int(d_row["amount"]))
+    await state.set_state(FinFSM.tx_sys_amount)
+    await state.update_data(sys_target_id=did, sys_std_amt=full_amt)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn(f"✅ To'liq ({fmt_sum(full_amt)} so'm)", "fn:txsok")],
+        [btn("⬅️ Orqaga", "fn:txbackcat")],
+    ])
+    await _edit_or_send(
+        cb.message,
+        f"🤝 <b>{app.esc(d_row['person_name'])}</b> — joriy qoldiq: <b>{fmt_sum(full_amt)} so'm</b>\n\n"
+        "To'liq yopish tugmasini bosing yoki qisman summani yozing:",
+        kb,
+        state,
+    )
+
+
+@router.callback_query(FinFSM.tx_sys_amount, F.data == "fn:txsok")
+async def cb_tx_sys_std(cb: CallbackQuery, state: FSMContext):
+    await cb.answer("Bajarildi!")
+    data = await state.get_data()
+    await _finish_sys_tx(state, int(data["sys_std_amt"]))
+
+
+@router.message(FinFSM.tx_sys_amount)
+async def msg_tx_sys_amt(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    await messenger.delete_user_quiet(message.message_id)
+    amt = await _handle_amount_step(state, raw, "tx_sys_amount")
+    if amt is None or amt == -1:
+        return
+    await _finish_sys_tx(state, amt)
+
+
+async def _finish_sys_tx(state: FSMContext, amt: int):
+    data = await state.get_data()
+    sys_key = data.get("sys_key")
+    target_id = int(data["sys_target_id"])
+    cat_id = data.get("cat_id")
+    cat_label = data.get("cat_label")
+    p_mid = data.get("panel_mid")
+
+    tx_id = None
+    summary_line = ""
+    if sys_key == "sys_loan":
+        res = pay_loan(
+            target_id,
+            pay_amount=amt,
+            from_account_id=data.get("from_acc"),
+            category_id=cat_id,
+            category_label=cat_label,
+        )
+        tx_id = res.get("tx_id")
+        st_note = "🎉 Kredit to'liq yopildi!" if res.get("status") == "paid" else f"Qoldi: {fmt_sum(res['remaining_debt'])} so'm ({res['remaining_installments']} oy)"
+        summary_line = f"✅ <b>{app.esc(res.get('title', 'Kredit'))}</b> uchun <b>{fmt_sum(amt)} so'm</b> to'landi.\n{st_note}"
+    elif sys_key == "sys_rent":
+        res = pay_recurring(
+            target_id,
+            pay_amount=amt,
+            from_account_id=data.get("from_acc"),
+            category_id=cat_id,
+            category_label=cat_label,
+        )
+        tx_id = res.get("tx_id")
+        st_note = "🎉 Shu oy rejasi to'liq yopildi!" if res.get("closed_this_month") else f"Shu oy qoldi: {fmt_sum(res['remaining_this_month'])} so'm"
+        summary_line = f"✅ <b>{app.esc(res.get('title', 'Ijara'))}</b> uchun <b>{fmt_sum(amt)} so'm</b> to'landi.\n{st_note}"
+    elif sys_key in ("sys_debt_out", "sys_debt_in"):
+        acc_id = data.get("from_acc") if sys_key == "sys_debt_out" else data.get("to_acc")
+        res = settle_debt(
+            target_id,
+            pay_amount=amt,
+            account_id=acc_id,
+            category_id=cat_id,
+            category_label=cat_label,
+        )
+        tx_id = res.get("tx_id")
+        st_note = "🎉 To'liq yopildi!" if res.get("status") == "settled" else f"Qoldiq: {fmt_sum(abs(res['remaining']))} so'm"
+        act_w = "ga qaytarildi" if sys_key == "sys_debt_out" else "dan haq olindi"
+        summary_line = f"✅ <b>{app.esc(res.get('person', ''))}</b>{act_w}: <b>{fmt_sum( res.get('paid', amt) )} so'm</b>.\n{st_note}"
+
+    await state.clear()
+    await _show_tx_confirmation(p_mid, summary_line, tx_id)
 
 
 @router.callback_query(F.data.startswith("fn:txa2:"))
@@ -1086,9 +1951,11 @@ async def msg_tx_amount(message: Message, state: FSMContext):
 async def _after_tx_amount(state: FSMContext, amt: int):
     await state.update_data(tx_amt=amt)
     await state.set_state(FinFSM.tx_note)
+    data = await state.get_data()
+    cat_lbl = data.get("cat_label") or "Amaliyot"
     await _edit_or_send(
         None,
-        f"📝 Izoh yoki toifani yozing ({fmt_sum(amt)} so'm) yoki o'tkazib yuboring:",
+        f"{cat_lbl} — <b>{fmt_sum(amt)} so'm</b>\n📝 Izoh yozing yoki o'tkazib yuboring:",
         InlineKeyboardMarkup(inline_keyboard=[
             [btn("⏭ Izohsiz saqlash", "fn:txsave")],
             [btn("⬅️ Bekor", "fn:home")],
@@ -1113,15 +1980,22 @@ async def msg_tx_note(message: Message, state: FSMContext):
 async def _finalize_tx(state: FSMContext, note: str):
     data = await state.get_data()
     mode = data.get("tx_mode", "exp")
-    cat = {"exp": "expense", "inc": "income", "trf": "transfer"}.get(mode, "expense")
-    record_transaction(
-        int(data["tx_amt"]), cat, note=note,
-        from_account_id=data.get("from_acc"), to_account_id=data.get("to_acc"),
+    default_cat = {"exp": "➖ Chiqim", "inc": "➕ Kirim", "trf": "🔄 O'tkazma"}.get(mode, "➖ Chiqim")
+    cat_label = data.get("cat_label") or default_cat
+    amt = int(data["tx_amt"])
+    tx_id = record_transaction(
+        amt,
+        cat_label,
+        note=note,
+        from_account_id=data.get("from_acc"),
+        to_account_id=data.get("to_acc"),
+        category_id=data.get("cat_id"),
     )
     p_mid = data.get("panel_mid")
     await state.clear()
-    text, kb = home_view()
-    await _edit_direct(p_mid, text, kb)
+    note_s = f"\n📝 Izoh: <i>{app.esc(note)}</i>" if note else ""
+    summary_html = f"✅ Saqlandi: <b>{fmt_sum(amt)} so'm</b> ({app.esc(cat_label)}){note_s}"
+    await _show_tx_confirmation(p_mid, summary_html, tx_id)
 
 
 # ------------------------------------------------------------------ 3) Qarz va Haqlar (`finance_debts`)
@@ -1751,6 +2625,7 @@ async def cb_confirm_amount(cb: CallbackQuery, state: FSMContext):
         "acc_limit": _finish_acc_limit,
         "acc_edit_bal": _finish_acc_edit_bal,
         "tx_amount": _after_tx_amount,
+        "tx_sys_amount": _finish_sys_tx,
         "debt_amount": _after_debt_amount,
         "debt_pay_amt": _finish_debt_part,
         "loan_total": _after_loan_total,
@@ -1763,14 +2638,3 @@ async def cb_confirm_amount(cb: CallbackQuery, state: FSMContext):
     fn = dispatch.get(step)
     if fn:
         await fn(state, amt)
-
-
-async def _edit_direct(mid: int | None, text: str, kb: InlineKeyboardMarkup):
-    if mid is not None:
-        try:
-            await app.bot.edit_message_text(text, chat_id=app.CHAT_ID, message_id=mid, reply_markup=messenger.with_delete(kb))
-            db.ex("UPDATE msg_log SET text = ? WHERE message_id = ? AND deleted_at IS NULL", (text, mid))
-            return
-        except Exception:
-            pass
-    await messenger.send(text, "info", kb, bind_trigger=False)

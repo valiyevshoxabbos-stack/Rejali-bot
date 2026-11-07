@@ -1,5 +1,5 @@
 """
-Sozlamalar (3.0.1): joylashuv, eslatma rejimlari, uyqu, vazn, pauza,
+Sozlamalar (3.5.1): joylashuv, eslatma rejimlari, uyqu, vazn, pauza,
 ma'lumotlar (zaxira, tiklash, CSV eksport, hammasini o'chirish).
 Xabarlarni tozalash ekrani feat_cleanup.py da, zaxiradan tiklash oqimi feat_restore.py da.
 """
@@ -444,13 +444,17 @@ async def process_wipe(message: Message, state: FSMContext):
     for table in ("occurrences", "qazo", "notes", "checkpoint_status", "overrides", "sleep_log", "weight_log",
                   "birthdays", "birthday_notices", "msg_log", "cleanup_events", "checkpoints",
                   "expense_splits", "expenses", "sessions",
-                  "challenge_bonuses", "challenge_logs", "challenge_tasks", "challenges",
+                  "challenge_freezes", "challenge_bonuses", "challenge_logs", "challenge_tasks", "challenges",
                   "finance_transactions", "finance_recurring", "finance_loans", "finance_debts", "finance_accounts"):
         db.ex(f"DELETE FROM {table}")
+    db.ex("DELETE FROM finance_categories WHERE is_default = 0")
+    db.ex("UPDATE finance_categories SET usage_count = 0, is_active = 1")
+    if "finance" in app.OPTIONAL:
+        app.OPTIONAL["finance"].seed_finance_categories()
     db.ex("DELETE FROM reminders WHERE source = 'custom'")
     db.ex("UPDATE reminders SET mode = 'required', off_until = NULL")
     db.ex("DELETE FROM settings WHERE key LIKE 'journal_%' OR key LIKE 'trg_%' OR key LIKE 'fwarn_%'")
-    for key in ("pause_until", "weight_prompt_until", "weight_pending"):
+    for key in ("pause_until", "weight_prompt_until", "weight_pending", "last_archive"):
         db.del_setting(key)
     await common.clear_prompts(state)
     await state.clear()

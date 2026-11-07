@@ -1,6 +1,8 @@
 """
-Universal Chelenj Dvigateli (3.5 — feat_challenges.py):
+Universal Chelenj Dvigateli (3.5.1 — feat_challenges.py):
 - Hech qanday oldindan qotirilgan (hardcode) chelenj yo'q: barcha chelenj va vazifalar dinamik CRUD (FSM + inline) orqali boshqariladi.
+- Yangi chelenjda boshlanish sanasi: «🟢 Bugundan» yoki «⏳ Ertadan» (ertadan tanlansa bugungi xulosaga kirmaydi va uzilish yozilmaydi).
+- Har bir chelenj uchun ko'pi bilan 2 marta «🧊 Muzlatish (Skip Day)» imkoniyati.
 - 4 xil vazifa turi:
   1) `binary` — Ha/Yo'q tugmasi
   2) `numeric` — sonli ko'rsatkich (masalan bet, km, daqiqa)
@@ -50,9 +52,13 @@ TYPE_LABELS = {
 }
 
 
+MAX_FREEZES_DEFAULT = 2
+
+
 class ChFSM(StatesGroup):
     ch_title = State()
     ch_duration = State()
+    ch_start = State()
     task_title = State()
     task_type = State()
     task_target = State()
@@ -110,15 +116,53 @@ def create_challenge(
     duration_days: int,
     start_date: date | None = None,
     bonus_points: int = scoring.DEFAULT_CHALLENGE_BONUS,
+    max_freezes: int = MAX_FREEZES_DEFAULT,
 ) -> int:
     s_date = start_date or app.today()
     dur = max(1, int(duration_days))
     e_date = s_date + timedelta(days=dur - 1)
     return db.ins(
-        "INSERT INTO challenges (title, duration_days, start_date, end_date, bonus_points, status) "
-        "VALUES (?,?,?,?,?,'active')",
-        (title.strip(), dur, s_date.isoformat(), e_date.isoformat(), max(1, int(bonus_points))),
+        "INSERT INTO challenges (title, duration_days, start_date, end_date, bonus_points, status, freezes_used, max_freezes) "
+        "VALUES (?,?,?,?,?,'active',0,?)",
+        (title.strip(), dur, s_date.isoformat(), e_date.isoformat(), max(1, int(bonus_points)), max(0, int(max_freezes))),
     )
+
+
+def freeze_day(challenge_id: int, d: date | None = None) -> dict:
+    """
+    Chelenj kunini muzlatadi («🧊 Muzlatish (Skip Day)»).
+    Har bir chelenj uchun ko'pi bilan `max_freezes` (standart 2) marta ruxsat etiladi.
+    """
+    d = d or app.today()
+    ch = db.q1("SELECT * FROM challenges WHERE id = ?", (challenge_id,))
+    if not ch or ch["status"] != "active":
+        return {"ok": False, "error": "Faol chelenj topilmadi."}
+    s_date = date.fromisoformat(ch["start_date"])
+    e_date = date.fromisoformat(ch["end_date"])
+    if d < s_date:
+        return {"ok": False, "error": "Chelenj hali boshlanmagan."}
+    if d > e_date:
+        return {"ok": False, "error": "Chelenj muddati tugagan."}
+    if db.q1("SELECT 1 FROM challenge_freezes WHERE challenge_id = ? AND freeze_date = ?", (challenge_id, d.isoformat())):
+        return {"ok": False, "error": "Bugungi kun allaqachon muzlatilgan."}
+    used = int(ch.get("freezes_used") or 0)
+    limit = int(ch.get("max_freezes") if ch.get("max_freezes") is not None else MAX_FREEZES_DEFAULT)
+    if used >= limit:
+        return {"ok": False, "error": f"Muzlatish limiti tugagan ({used}/{limit} marta ishlatilgan)."}
+
+    db.ex(
+        "INSERT INTO challenge_freezes (challenge_id, freeze_date) VALUES (?,?)",
+        (challenge_id, d.isoformat()),
+    )
+    new_used = used + 1
+    db.ex("UPDATE challenges SET freezes_used = ? WHERE id = ?", (new_used, challenge_id))
+    scoring.set_challenge_day_bonus(challenge_id, d, ch["bonus_points"], completed=False)
+    return {
+        "ok": True,
+        "freezes_used": new_used,
+        "max_freezes": limit,
+        "remaining": max(0, limit - new_used),
+    }
 
 
 def add_task(
@@ -313,6 +357,13 @@ def evaluate_day(challenge_id: int, d: date) -> dict:
             "badge": info,
         })
 
+    is_frozen = (
+        db.q1(
+            "SELECT 1 FROM challenge_freezes WHERE challenge_id = ? AND freeze_date = ?",
+            (challenge_id, d.isoformat()),
+        )
+        is not None
+    )
     if due_count == 0 and not any_done_today:
         day_status = "rest"
     elif all_satisfied and (any_done_today or all(ts["satisfied"] for ts in task_states)):
@@ -322,10 +373,12 @@ def evaluate_day(challenge_id: int, d: date) -> dict:
             day_status = "rest"
         else:
             day_status = "complete"
+    elif is_frozen:
+        day_status = "frozen"
     else:
         day_status = "incomplete"
 
-    return {"day_status": day_status, "tasks": task_states}
+    return {"day_status": day_status, "tasks": task_states, "frozen": is_frozen}
 
 
 def log_task(
@@ -419,18 +472,27 @@ def challenge_progress(challenge_id: int, ref_today: date | None = None) -> dict
     complete_days = 0
     incomplete_days = 0
     rest_days = 0
+    frozen_days = 0
     cur = s_date
     while cur <= last_eval:
         ev = evaluate_day(challenge_id, cur)
         if ev["day_status"] == "complete":
             complete_days += 1
+        elif ev["day_status"] == "frozen":
+            frozen_days += 1
         elif ev["day_status"] == "rest":
             rest_days += 1
         elif cur < ref_today:
             incomplete_days += 1
         cur += timedelta(days=1)
 
-    today_ev = evaluate_day(challenge_id, ref_today) if s_date <= ref_today <= e_date else {"day_status": "outside", "tasks": []}
+    today_ev = (
+        evaluate_day(challenge_id, ref_today)
+        if s_date <= ref_today <= e_date
+        else {"day_status": "outside", "tasks": [], "frozen": False}
+    )
+    freezes_used = int(ch.get("freezes_used") or 0)
+    max_freezes = int(ch.get("max_freezes") if ch.get("max_freezes") is not None else MAX_FREEZES_DEFAULT)
     return {
         "challenge": ch,
         "day_index": day_index,
@@ -438,6 +500,10 @@ def challenge_progress(challenge_id: int, ref_today: date | None = None) -> dict
         "complete_days": complete_days,
         "incomplete_days": incomplete_days,
         "rest_days": rest_days,
+        "frozen_days": frozen_days,
+        "freezes_used": freezes_used,
+        "max_freezes": max_freezes,
+        "not_started": ref_today < s_date,
         "today_eval": today_ev,
     }
 
@@ -478,20 +544,32 @@ def dashboard_view(ref_today: date | None = None) -> tuple[str, InlineKeyboardMa
         for ch in actives:
             prog = challenge_progress(ch["id"], ref_today)
             t_ev = prog["today_eval"]
-            st_icon = "✅" if t_ev["day_status"] == "complete" else ("⏸" if t_ev["day_status"] == "rest" else "🔥")
-            lines.append(
-                f"{st_icon} <b>{app.esc(ch['title'])}</b> — kun <b>{prog['day_index']}/{prog['duration_days']}</b> "
-                f"(✅ {prog['complete_days']} kun, +{ch['bonus_points']} ball/kun)"
-            )
-            for ts in t_ev["tasks"]:
-                t = ts["task"]
-                lines.append(f"   • {app.esc(t['title'])}: {ts['badge']}")
-                if ts["due"] or t["task_type"] == "weekly_quota":
-                    if t["task_type"] == "numeric":
-                        rows.append([btn(f"🔢 {t['title'][:20]} ({ts['badge']})", f"ch:num:{t['id']}:d")])
-                    else:
-                        mark = "✅" if ts["done_today"] else "⬜"
-                        rows.append([btn(f"{mark} {t['title'][:24]}", f"ch:tg:{t['id']}:d")])
+            if prog["not_started"]:
+                lines.append(
+                    f"⏳ <b>{app.esc(ch['title'])}</b> — boshlanishi: <b>{ch['start_date']}</b> "
+                    f"({prog['duration_days']} kun, +{ch['bonus_points']} ball/kun)"
+                )
+            else:
+                st_icon = (
+                    "✅" if t_ev["day_status"] == "complete"
+                    else ("🧊" if t_ev["day_status"] == "frozen" else ("⏸" if t_ev["day_status"] == "rest" else "🔥"))
+                )
+                lines.append(
+                    f"{st_icon} <b>{app.esc(ch['title'])}</b> — kun <b>{prog['day_index']}/{prog['duration_days']}</b> "
+                    f"(✅ {prog['complete_days']} kun, 🧊 {prog['freezes_used']}/{prog['max_freezes']}, +{ch['bonus_points']} ball/kun)"
+                )
+                for ts in t_ev["tasks"]:
+                    t = ts["task"]
+                    lines.append(f"   • {app.esc(t['title'])}: {ts['badge']}")
+                    if ts["due"] or t["task_type"] == "weekly_quota":
+                        if t["task_type"] == "numeric":
+                            rows.append([btn(f"🔢 {t['title'][:20]} ({ts['badge']})", f"ch:num:{t['id']}:d")])
+                        else:
+                            mark = "✅" if ts["done_today"] else "⬜"
+                            rows.append([btn(f"{mark} {t['title'][:24]}", f"ch:tg:{t['id']}:d")])
+                if t_ev["day_status"] == "incomplete" and prog["freezes_used"] < prog["max_freezes"]:
+                    rem_f = prog["max_freezes"] - prog["freezes_used"]
+                    rows.append([btn(f"🧊 Muzlatish (Skip Day) [{rem_f}/{prog['max_freezes']}]", f"ch:frz:{ch['id']}:d")])
             rows.append([btn(f"⚙️ {ch['title'][:24]}", f"ch:open:{ch['id']}")])
             lines.append("")
 
@@ -506,11 +584,18 @@ def detail_view(challenge_id: int, ref_today: date | None = None) -> tuple[str, 
         return dashboard_view(ref_today)
     ch = prog["challenge"]
     st_map = {"active": "🟢 Faol", "completed": "🏁 Yakunlangan", "cancelled": "⏹ To'xtatilgan"}
+    day_s = (
+        f"⏳ {ch['start_date']} dan boshlanadi"
+        if prog["not_started"]
+        else f"<b>{prog['day_index']}/{prog['duration_days']}-kun</b>"
+    )
     lines = [
         f"🏆 <b>{app.esc(ch['title'])}</b> ({st_map.get(ch['status'], ch['status'])})",
-        f"📅 Muddat: {ch['start_date']} → {ch['end_date']} (<b>{prog['day_index']}/{prog['duration_days']}-kun</b>)",
+        f"📅 Muddat: {ch['start_date']} → {ch['end_date']} ({day_s})",
         f"📊 Natija: ✅ <b>{prog['complete_days']}</b> to'liq · ⚠️ <b>{prog['incomplete_days']}</b> to'liq emas"
+        + (f" · 🧊 {prog['frozen_days']} muzlatilgan" if prog["frozen_days"] else "")
         + (f" · ⏸ {prog['rest_days']} dam" if prog["rest_days"] else ""),
+        f"🧊 Muzlatish limiti: <b>{prog['freezes_used']}/{prog['max_freezes']}</b> ishlatilgan",
         f"⭐ Kunlik to'liq yopish bonusi: <b>+{ch['bonus_points']} ball</b>",
     ]
     rows = []
@@ -532,7 +617,7 @@ def detail_view(challenge_id: int, ref_today: date | None = None) -> tuple[str, 
                 extra = f" [maqsad: {_fmt_num(t['target_value'])}{u_s}]"
             lines.append(f"• {app.esc(t['title'])}{app.esc(extra)} — {badge}")
 
-            if ch["status"] == "active" and ts and (ts["due"] or t["task_type"] == "weekly_quota"):
+            if ch["status"] == "active" and not prog["not_started"] and ts and (ts["due"] or t["task_type"] == "weekly_quota"):
                 if t["task_type"] == "numeric":
                     rows.append([btn(f"🔢 {t['title'][:22]} ({badge})", f"ch:num:{t['id']}:o")])
                 else:
@@ -542,6 +627,9 @@ def detail_view(challenge_id: int, ref_today: date | None = None) -> tuple[str, 
         lines.append("\n<i>Hali vazifalar qo'shilmagan.</i>")
 
     if ch["status"] == "active":
+        if not prog["not_started"] and prog["today_eval"]["day_status"] == "incomplete" and prog["freezes_used"] < prog["max_freezes"]:
+            rem_f = prog["max_freezes"] - prog["freezes_used"]
+            rows.append([btn(f"🧊 Muzlatish (Skip Day) [{rem_f}/{prog['max_freezes']}]", f"ch:frz:{ch['id']}:o")])
         rows.append([btn("➕ Vazifa qo'shish", f"ch:addt:{ch['id']}"), btn("✏️ Tahrirlash", f"ch:ed:{ch['id']}")])
         rows.append([btn("⏹ To'xtatish", f"ch:stop:{ch['id']}"), btn("⬅️ Chelenjlar", "ch:home")])
     else:
@@ -552,10 +640,16 @@ def detail_view(challenge_id: int, ref_today: date | None = None) -> tuple[str, 
 # ------------------------------------------------------------------ 21:45 Kechki xulosa integratsiyasi
 
 def evening_challenges_section_and_kb(ref_today: date | None = None) -> tuple[str, InlineKeyboardMarkup | None]:
-    """21:45 kechki xulosa uchun faol chelenjlar holati va tezkor inline boshqaruv tugmalari."""
+    """
+    21:45 kechki xulosa uchun faol va boshlangan (`start_date <= today`) chelenjlar holati.
+    «Ertadan» deb ochilgan chelenjlar bugungi kechki xulosaga kirmaydi va uzilish yozilmaydi!
+    """
     ref_today = ref_today or app.today()
     sync_lifecycle(ref_today)
-    actives = db.q("SELECT * FROM challenges WHERE status = 'active' ORDER BY id")
+    actives = db.q(
+        "SELECT * FROM challenges WHERE status = 'active' AND start_date <= ? ORDER BY id",
+        (ref_today.isoformat(),),
+    )
     if not actives:
         return "", None
     lines = ["\n\n🏆 <b>Chelenjlar holati:</b>"]
@@ -563,16 +657,22 @@ def evening_challenges_section_and_kb(ref_today: date | None = None) -> tuple[st
     for ch in actives:
         prog = challenge_progress(ch["id"], ref_today)
         t_ev = prog["today_eval"]
-        icon = "✅" if t_ev["day_status"] == "complete" else ("⏸" if t_ev["day_status"] == "rest" else "⏳")
+        icon = (
+            "✅" if t_ev["day_status"] == "complete"
+            else ("🧊" if t_ev["day_status"] == "frozen" else ("⏸" if t_ev["day_status"] == "rest" else "⏳"))
+        )
         lines.append(f"{icon} <b>{app.esc(ch['title'])}</b> ({prog['day_index']}/{prog['duration_days']}-kun)")
         for ts in t_ev["tasks"]:
             t = ts["task"]
             lines.append(f"  • {app.esc(t['title'])}: {ts['badge']}")
-            if not ts["done_today"] and ts["due"]:
+            if not ts["done_today"] and ts["due"] and t_ev["day_status"] != "frozen":
                 if t["task_type"] == "numeric":
                     rows.append([btn(f"🔢 {t['title'][:22]}", f"ch:num:{t['id']}:d")])
                 else:
                     rows.append([btn(f"⬜ {t['title'][:24]}", f"ch:tg:{t['id']}:d")])
+        if t_ev["day_status"] == "incomplete" and prog["freezes_used"] < prog["max_freezes"]:
+            rem_f = prog["max_freezes"] - prog["freezes_used"]
+            rows.append([btn(f"🧊 Muzlatish ({ch['title'][:14]}) [{rem_f}/{prog['max_freezes']}]", f"ch:frz:{ch['id']}:d")])
     rows.append([btn("🏆 Chelenjlar paneli", "ch:home")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -635,6 +735,21 @@ async def cb_history(cb: CallbackQuery):
         kb_rows.append([btn(f"{icon} {ch['title'][:24]}", f"ch:open:{ch['id']}")])
     kb_rows.append([btn("⬅️ Orqaga", "ch:home")])
     await _edit_or_send(cb.message, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows))
+
+
+@router.callback_query(F.data.startswith("ch:frz:"))
+async def cb_freeze_day(cb: CallbackQuery):
+    _, _, cid_s, origin = cb.data.split(":")
+    cid = int(cid_s)
+    res = freeze_day(cid, app.today())
+    if not res.get("ok"):
+        await cb.answer(res.get("error", "Xatolik"), show_alert=True)
+        return
+    await cb.answer(f"🧊 Bugun muzlatildi! Qoldi: {res['remaining']}/{res['max_freezes']}")
+    if db.get_setting(f"journal_{app.today().isoformat()}"):
+        await journal.sync(app.today())
+    text, kb = detail_view(cid) if origin == "o" else dashboard_view()
+    await _edit_or_send(cb.message, text, kb)
 
 
 @router.callback_query(F.data.startswith("ch:tg:"))
@@ -782,13 +897,27 @@ async def msg_ch_title(message: Message, state: FSMContext):
     )
 
 
+async def _ask_start_date(target_msg, state: FSMContext, dur: int):
+    await state.update_data(ch_dur=dur)
+    await state.set_state(ChFSM.ch_start)
+    data = await state.get_data()
+    tom_s = (app.today() + timedelta(days=1)).strftime("%d.%m")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn("🟢 Bugundan", "ch:st:today"), btn(f"⏳ Ertadan ({tom_s})", "ch:st:tomorrow")],
+        [btn("⬅️ Bekor", "ch:home")],
+    ])
+    text = f"🏆 <b>{app.esc(data['ch_title'])}</b> ({dur} kun)\n\nChelenj qachondan boshlansin?"
+    if target_msg is not None:
+        await _edit_or_send(target_msg, text, kb, state)
+    else:
+        await _edit_by_mid(data["panel_mid"], text, kb)
+
+
 @router.callback_query(ChFSM.ch_duration, F.data.startswith("ch:dur:"))
 async def cb_ch_dur(cb: CallbackQuery, state: FSMContext):
     dur = int(cb.data.split(":")[2])
     await cb.answer()
-    data = await state.get_data()
-    cid = create_challenge(data["ch_title"], dur)
-    await _prompt_task_title(cb.message, state, cid)
+    await _ask_start_date(cb.message, state, dur)
 
 
 @router.message(ChFSM.ch_duration)
@@ -797,17 +926,17 @@ async def msg_ch_dur(message: Message, state: FSMContext):
     await messenger.delete_user_quiet(message.message_id)
     if not raw.isdigit() or int(raw) <= 0:
         return
+    await _ask_start_date(None, state, int(raw))
+
+
+@router.callback_query(ChFSM.ch_start, F.data.startswith("ch:st:"))
+async def cb_ch_start(cb: CallbackQuery, state: FSMContext):
+    choice = cb.data.split(":")[2]
+    await cb.answer()
     data = await state.get_data()
-    cid = create_challenge(data["ch_title"], int(raw))
-    await state.update_data(challenge_id=cid)
-    await state.set_state(ChFSM.task_title)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Chelenjga o'tish", f"ch:open:{cid}")]])
-    await _edit_by_mid(
-        data["panel_mid"],
-        f"✅ <b>{app.esc(data['ch_title'])}</b> ({raw} kun) yaratildi!\n\n"
-        "Endi 1-vazifa nomini yozing:",
-        kb,
-    )
+    s_date = app.today() + timedelta(days=1) if choice == "tomorrow" else app.today()
+    cid = create_challenge(data["ch_title"], int(data["ch_dur"]), start_date=s_date)
+    await _prompt_task_title(cb.message, state, cid)
 
 
 async def _prompt_task_title(target_msg, state: FSMContext, cid: int):

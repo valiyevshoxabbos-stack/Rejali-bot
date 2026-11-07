@@ -316,7 +316,37 @@ CREATE TABLE finance_transactions (
 CREATE INDEX idx_fin_tx_created ON finance_transactions(created_at);
 """
 
-MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4]
+# v5 (3.5.1): Moliya kategoriyalari, Tranzaksiya Undo metadata va Chelenj Muzlatish (Skip Day) tizimi.
+MIGRATION_5 = """
+CREATE TABLE finance_categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,                  -- expense | income
+    icon TEXT NOT NULL DEFAULT '📌',
+    system_key TEXT,                     -- sys_loan | sys_rent | sys_debt_out | sys_debt_in | NULL
+    is_system INTEGER NOT NULL DEFAULT 0,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    usage_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_fin_cat_type ON finance_categories(type, is_active);
+
+ALTER TABLE finance_transactions ADD COLUMN category_id INTEGER;
+ALTER TABLE finance_transactions ADD COLUMN linked_kind TEXT;
+ALTER TABLE finance_transactions ADD COLUMN linked_id INTEGER;
+ALTER TABLE finance_transactions ADD COLUMN undo_meta TEXT;
+
+ALTER TABLE challenges ADD COLUMN freezes_used INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE challenges ADD COLUMN max_freezes INTEGER NOT NULL DEFAULT 2;
+
+CREATE TABLE challenge_freezes (
+    challenge_id INTEGER NOT NULL,
+    freeze_date TEXT NOT NULL,
+    PRIMARY KEY (challenge_id, freeze_date)
+);
+"""
+
+MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5]
 
 REQUIRED_TABLES = (
     "settings", "reminders", "overrides", "checkpoints", "checkpoint_status",
@@ -423,6 +453,18 @@ def set_setting(key: str, value: str):
 
 def del_setting(key: str):
     ex("DELETE FROM settings WHERE key = ?", (key,))
+
+
+def vacuum():
+    """Bo'shagan joyni fizik qisqartirish uchun tranzaksiyadan tashqarida VACUUM va WAL checkpoint bajaradi."""
+    p = path()
+    close_db()
+    conn = sqlite3.connect(p, timeout=15.0, isolation_level=None)
+    try:
+        conn.execute("VACUUM")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
 
 
 def backup_to(src_path: str, dst_path: str):

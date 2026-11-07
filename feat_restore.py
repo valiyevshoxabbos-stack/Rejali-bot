@@ -139,6 +139,8 @@ async def cb_confirm_restore(cb: CallbackQuery, state: FSMContext):
 
     # Tiklashdan oldingi barcha eski tugmalar yangi bazadagi boshqa yozuvni o'zgartirmasligi uchun
     db.set_setting("epoch", app.now().replace(microsecond=0).isoformat())
+    if "finance" in app.OPTIONAL:
+        app.OPTIONAL["finance"].seed_finance_categories()
     await jobs.schedule_today()
     await messenger.send(
         f"✅ <b>Zaxira muvaffaqiyatli tiklandi!</b>\n"

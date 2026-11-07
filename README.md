@@ -1,30 +1,30 @@
-# AltronBek 3.5
+# AltronBek 3.5.1
 
-## Yangilash tartibi (3.1 → 3.5, ma'lumotlarni 100% saqlagan holda)
+## Yangilash tartibi (3.5 → 3.5.1, ma'lumotlarni 100% saqlagan holda)
 1. Telegramda botga kiring: **⚙️ Sozlamalar → 🗂 Ma'lumotlar → 📤 Zaxira nusxa** ni bosing va `.db` faylni saqlab oling.
 2. GitHub repo'da **Add file → Upload files** ni oching.
 3. Shu papkadagi **barcha fayllarni** (`bot.py`, `main.py`, `app.py`, `db.py`, `feat_*.py` va boshqalar — jami 31 ta yassi fayl) tanlab yuklang va **Commit changes** ni bosing.
 4. Railway avtomatik qayta deploy qiladi (`python bot.py`).
 5. Bot ishga tushganda:
-   - Avval bazaning yangilanishdan oldingi avtomatik nusxasini (`altronbek.db.pre-v4.bak`) Telegramga yuboradi;
-   - **"🟢 AltronBek 3.5 ishga tushdi."** xabarini yuboradi;
+   - Avval bazaning yangilanishdan oldingi avtomatik nusxasini (`altronbek.db.pre-v5.bak`) Telegramga yuboradi;
+   - Standart va tizimli moliya kategoriyalarini (`finance_categories`) xavfsiz to'ldiradi;
+   - **"🟢 AltronBek 3.5.1 ishga tushdi."** xabarini yuboradi;
    - Ketidan **🔄 Moliyaviy holat tekshiruvi (Start-up sync)** oynasini (`[✅ To'g'ri]`, `[➕ Qo'shish]`, `[✏️ Tahrirlash]`) chiqaradi.
-6. `/holat` buyrug'ini yuborib baza yo'li (`/data/altronbek.db`), sxema (`v4`) va barcha yozuvlar joyida ekanini tekshiring.
+6. `/holat` buyrug'ini yuborib baza yo'li (`/data/altronbek.db`), sxema (`v5`) va barcha yozuvlar joyida ekanini tekshiring.
 
-## 3.5 dagi yangiliklar (0% Hardcode — 100% Dinamik CRUD)
-- **Universal Chelenj Dvigateli (`feat_challenges.py`, `scoring.py`, `db.py` sxema `v4`):**
-  - `challenges`, `challenge_tasks`, `challenge_logs`, `challenge_bonuses` jadvallari.
-  - Bot ichidan 1 vazifalik yoki ko'p vazifalik chelenj yaratish, tahrirlash, vazifa qo'shish va to'xtatish (FSM + inline).
-  - 4 xil vazifa turi: `binary` (Ha/Yo'q), `numeric` (sonli maqsad), `weekly_quota` (haftada N kun), `schedule` (`mon,wed,fri`).
-  - **Davomiylik qoidasi:** vazifa o'tkazib yuborilsa chelenj noldan boshlanmaydi va bekor bo'lmaydi — 30 kunlik hisob davom etadi, faqat o'sha kun «to'liq emas» deb qayd etiladi.
-  - Kunlik barcha vazifalar to'liq yopilganda `scoring.py` orqali bonus ball qo'shiladi; `21:45` kechki xulosa va `/chelenjlar` menyusiga inline boshqaruv paneli ulandi.
-- **Universal Moliya Tizimi (`feat_finance.py`, `db.py` sxema `v4`):**
-  - `finance_accounts`, `finance_debts`, `finance_loans`, `finance_recurring`, `finance_transactions` jadvallari.
-  - **Smart Lifecycle:** kredit to'langanda `remaining_debt` va `remaining_installments` kamayib, `<= 0` bo'lganda `status = 'paid'` bo'ladi va qayta eslatilmaydi; qarzlar `0` ga yetganda `status = 'settled'` bo'lib eslatmadan tushadi.
-  - **Davriy to'lovlar (Partial Payment):** masalan `8–15` sanalar oynasida oy davomida qisman to'lab boriladi (`paid_amount_this_month`), `target_amount` ga yetgach shu oy uchun to'xtaydi va yangi oyda avtomatik yangilanadi.
-  - **Xavfsiz eslatmalar va filtrlar:** kredit kartalar uchun har oyning `5, 7 va 8`-sanalarida (`8-sana 17:00 gacha`) qat'iy ogohlantirish; «Yaqin to'lovlar» blokida FAQAT `<= 3 kun` qolgan to'lovlar; Minglik qoidasi (`25 → 25 000`, `400..999` sonlarda tasdiq).
-  - **Start-up sync** va `06:30` tonggi xulosada Moliya bloki (`Naqd`, `Kartalarda (jami)`, `Haqlar`, `Yaqin to'lovlar ≤3 kun`).
-- **Qo'shimcha qulayliklar:**
-  - `!` bilan boshlangan xabarlar tezkor qayd sifatida `notes` jadvaliga tushadi va `21:45` kechki xulosada eslatiladi.
-  - `feat_cleanup.py` to'liq In-place UX (`edit_message_text`) rejimiga o'tkazildi.
-  - `services.py` da `28, 29, 30, 31` kunlik oylar uchun xavfsiz sanalar arifmetikasi (`add_months`, `clamp_day`, `next_monthly_due_date`).
+## 3.5.1 dagi yangiliklar va tuzatishlar
+- **Tranzaksiyalar tarixi va sahifalash (`feat_finance.py`):**
+  - Moliya menyusida **📜 Tarix** tugmasi: oxirgi tranzaksiyalarni (sana, summa, hisob, kategoriya, izoh) sahifada 8 tadan chiqaradi.
+  - **⬅️ Oldingi / Keyingi ➡️** inline sahifalash (pagination) mavjud xabarni joyida tahrirlash (`edit_text`) orqali ishlaydi.
+- **Chelenj boshlanish sanasi va «🧊 Muzlatish (Skip Day)» (`feat_challenges.py`, `db.py` sxema `v5`):**
+  - Yangi chelenj yaratishda **🟢 Bugundan** yoki **⏳ Ertadan** varianti: «Ertadan» tanlansa `start_date` ertangi kun bo'ladi, bugungi `21:45` kechki xulosada hisoblanmaydi va uzilish/jarima yozilmaydi.
+  - Har bir chelenjda ko'pi bilan **2 marta «🧊 Muzlatish (Skip Day)»** imkoniyati (`challenge_freezes`): muzlatilgan kun uzilish (`to'liq emas`) sifatida hisoblanmaydi.
+- **Dinamik Kategoriyalar va Tizimli Integratsiya (`feat_finance.py`, `finance_categories`):**
+  - Standart chiqim (`Oziq-ovqat/Bozorlik`, `Kafe/Tushlik`, `Yo'l/Transport`, `Ilm/Ta'lim`, `Sport/Sog'liq`, `Kiyim`, `Ehson`, `Boshqa`) va kirim (`Stipendiya`, `Ish haqi (Maktab)`, `Qo'shimcha ish`, `Oila`, `Boshqa`) kategoriyalari hamda `[➕ Yangi kategoriya]` / `[⚙️ Tahrirlash]` boshqaruvi.
+  - **🏦 Kredit to'lovi** (chiqim): aktiv kreditlar ro'yxatini chiqaradi, tanlangan kreditning `remaining_debt` va `remaining_installments` qiymatini kamaytiradi va karta balansidan yechadi.
+  - **🏠 Ijara/Kvartira** (chiqim): `500 000 so'm` oylik rejadan to'langan qismini chegiradi va hisob balansidan yechadi.
+  - **🤝 Qarzni qaytarish** (chiqim): foydalanuvchi qarzdorliklarini (`I owe`) chiqarib, to'langan summani qarzdan va balansdan chegiradi.
+  - **🤝 Qarz qaytishi** (kirim): foydalanuvchi haqlarini (`Owe me`) chiqarib, to'langan summani haqdan kamaytiradi va hisob balansiga qo'shadi.
+- **1 daqiqalik Bekor qilish (Undo) va 90 kunlik Avto-Arxiv + `VACUUM`:**
+  - Kiritilgan har bir tranzaksiya tasdiq xabari tagida **1 daqiqa davomida «↩️ Bekor qilish»** tugmasi turadi: bosilsa tranzaksiya bazadan o'chiriladi, hisob balansi va bog'langan kredit/kvartira/qarz holati to'liq qaytariladi.
+  - APScheduler har 90 kunda `90` kundan eski `finance_transactions` va `challenge_logs` yozuvlarini JSON + CSV zaxira fayllari sifatida Telegramga yuborib, jadvaldan tozalaydi va `VACUUM;` orqali bazani fizik ixchamlashtiradi (kartalar va naqd pul balansi daxlsiz saqlanadi).

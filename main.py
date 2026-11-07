@@ -1,5 +1,5 @@
 """
-AltronBek 3.5: kirish nuqtasi (yassi tuzilma: feat_*.py).
+AltronBek 3.5.1: kirish nuqtasi (yassi tuzilma: feat_*.py).
 
 Asosiy modullar majburiy: yo'q bo'lsa bot ishga tushmaydi (xato darhol ko'rinadi).
 Ixtiyoriy modullar (feat_weather, feat_calculator, feat_challenges, feat_finance) mavjud bo'lsa avtomatik ulanadi.
@@ -143,6 +143,8 @@ async def amain():
         db.set_setting("epoch", app.now().replace(microsecond=0).isoformat())
     sv.seed_standard_reminders()
     setup()
+    if "finance" in app.OPTIONAL:
+        app.OPTIONAL["finance"].seed_finance_categories()
     app.scheduler.start()
     await jobs.schedule_today()
     try:

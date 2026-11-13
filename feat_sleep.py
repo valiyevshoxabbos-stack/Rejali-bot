@@ -84,24 +84,59 @@ def woke_today(d: date | None = None) -> bool:
 
 def cancel_tonight_bedtime_job(award_if_pending: bool = False) -> int:
     """
-    Bugungi 22:00 'yotish' eslatmasini APScheduler'dan olib tashlaydi (takroriy xabar kelmasin).
+    Bugungi 22:00 'yotish' eslatmasini va bugungi (< 23:59) qolgan kechki eslatmalarni APScheduler'dan olib tashlaydi.
+    Ertangi 06:30 tonggi xulosa, namozlar va tonggi gigiyenaga tegilmaydi.
     `award_if_pending=True` bo'lsa, bugungi yotish yozuvini 'done' qilib ballini ham beradi.
     """
     today = app.today()
+    pts = 0
     yotish = db.q1("SELECT * FROM reminders WHERE source = 'standard' AND slug = 'yotish' AND active = 1")
-    if not yotish:
-        return 0
-    occ_id = sv.ensure_occurrence(yotish, today)
-    job = app.scheduler.get_job(f"rem_{occ_id}")
-    if job:
-        job.remove()
-    if not award_if_pending:
-        return 0
-    occ = sv.get_occurrence(occ_id)
-    if occ and occ["status"] == "pending" and not sv.pause_active(today) and sv.effective_mode(yotish, today) != "off":
-        res = sv.mark_done(occ_id)
-        return res.get("points", 0)
-    return 0
+    if yotish:
+        occ_id = sv.ensure_occurrence(yotish, today)
+        job = app.scheduler.get_job(f"rem_{occ_id}")
+        if job:
+            job.remove()
+        if award_if_pending:
+            occ = sv.get_occurrence(occ_id)
+            if occ and occ["status"] == "pending" and not sv.pause_active(today) and sv.effective_mode(yotish, today) != "off":
+                res = sv.mark_done(occ_id)
+                pts = res.get("points", 0)
+
+    # Shuningdek, faqat BUGUNGI (23:59 gacha) qolgan pending eslatmalarni bekor qilish
+    today_str = today.isoformat()
+    now_iso = app.now().isoformat()
+    for row in db.q(
+        "SELECT id FROM occurrences WHERE date = ? AND status = 'pending' AND scheduled_at >= ?",
+        (today_str, now_iso),
+    ):
+        job = app.scheduler.get_job(f"rem_{row['id']}")
+        if job:
+            job.remove()
+    return pts
+
+
+def auto_close_open_sleep(default_wake_at: datetime | None = None) -> dict | None:
+    """
+    Foydalanuvchi tongda 'Uyg'ondim' tugmasini bosishni unutgan bo'lsa,
+    06:30 da ochiq uyqu holatini avtomatik yopadi (is_sleeping rejimida qolib ketmaslik uchun).
+    """
+    open_row = _open_sleep_row()
+    if not open_row:
+        return None
+    start = datetime.fromisoformat(open_row["sleep_start"])
+    wake_at = default_wake_at or app.now()
+    if wake_at <= start:
+        wake_at = max(app.now(), start + timedelta(hours=7))
+    res = finish_sleep(wake_at, "auto-0630")
+    if isinstance(res, dict) and "error" in res:
+        dur = max(360, int((wake_at - start).total_seconds() // 60))
+        db.ex(
+            "UPDATE sleep_log SET wake_at = ?, duration_min = ?, wake_source = 'auto-0630' WHERE id = ?",
+            (wake_at.isoformat(), dur, open_row["id"]),
+        )
+        res = {"duration": dur, "start": start}
+    app.log.info(f"Ochiq uyqu avtomatik yopildi: wake_at={wake_at.strftime('%H:%M')}")
+    return res
 
 
 def on_bedtime_confirmed(confirmed_at: datetime | None = None) -> datetime:

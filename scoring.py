@@ -80,14 +80,30 @@ def _summary(rows: list[dict], extra_points: int = 0, challenge_days: int = 0) -
     }
 
 
+def is_sick_day(d_iso: str) -> bool:
+    has_med = db.q1("SELECT 1 FROM health_intake_logs WHERE DATE(taken_at) = ? LIMIT 1", (d_iso,))
+    if has_med:
+        return True
+    return bool(db.get_setting(f"sick_{d_iso}"))
+
+
 def _range_rows(first: date, last: date) -> list[dict]:
     """Faqat vaqti kelgan (yoki allaqachon bajarilgan) eslatmalar hisoblanadi: kun davomida foiz sun'iy pasaymasin."""
-    return db.q(
-        "SELECT status, points, is_optional FROM occurrences "
+    rows = db.q(
+        "SELECT date, title, status, points, is_optional FROM occurrences "
         "WHERE date BETWEEN ? AND ? AND is_subtask = 0 AND scored = 1 "
         "AND (scheduled_at <= ? OR status = 'done')",
         (first.isoformat(), last.isoformat(), app.now().isoformat()),
     )
+    res = []
+    sport_kws = ("sport", "mashq", "zal", "yugurish", "workout", "fitness", "trenirovka")
+    for r in rows:
+        # Kasallik/dori ichilgan kunlarda bajarilmagan sport eslatmalariga jarima yozilmaydi (required'dan olinadi)
+        if r["status"] != "done" and any(k in (r.get("title") or "").lower() for k in sport_kws):
+            if is_sick_day(r["date"]):
+                continue
+        res.append(r)
+    return res
 
 
 def week_summary(monday: date) -> dict:

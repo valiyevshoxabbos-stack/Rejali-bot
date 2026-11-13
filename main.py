@@ -8,6 +8,7 @@ Ixtiyoriy modullar (feat_weather, feat_calculator, feat_challenges, feat_finance
 import asyncio
 import importlib
 import os
+import traceback
 from datetime import datetime
 
 from aiogram import BaseMiddleware
@@ -23,7 +24,7 @@ CORE = [
     "menu", "reminders", "qazo", "sleep", "birthdays", "weight",
     "stats", "settings", "cleanup", "summary", "status", "restore",
 ]
-OPTIONAL = ["weather", "calculator", "challenges", "finance", "market"]
+OPTIONAL = ["weather", "calculator", "challenges", "finance", "market", "health"]
 
 CHANGELOGS: dict[str, str] = {
     "3.6": (
@@ -33,6 +34,13 @@ CHANGELOGS: dict[str, str] = {
         "• 🛡 <b>Anti-Cheat:</b> Narxning asossiz sakrashi (+35%) bo'yicha ogohlantirish.\n"
         "• 📍 <b>Savdo joylari tahlili:</b> Teglar bo'yicha qayerda arzonroq ekanini aniqlash."
     ),
+    "3.7": (
+        "🚀 <b>AltronBek v3.7 yangilanishi muvaffaqiyatli o'rnatildi!</b>\n"
+        "• 💊 <b>Oddiy Dorixona:</b> Uyda va sumkadagi dorilar zaxirasi, tugash va takroriy doza ogohlantirishlari.\n"
+        "• 🩺 <b>Davolanish kursi:</b> Shifokor buyurgan dorilar jadvali va eslatmalari.\n"
+        "• 👨‍⚕️ <b>Virtual Dorixonachi:</b> Belgilar tahlili, xavf (Red Flag) filtri va tabiiy tavsiyalar.\n"
+        "• 🧴 <b>Skin Care & Tonggi gigiyena:</b> Har kunlik 06:45 parvarish va ob-havoga mos himoya."
+    ),
 }
 
 COMMANDS = [
@@ -40,6 +48,9 @@ COMMANDS = [
     ("chelenjlar", "Chelenjlar paneli"),
     ("moliya", "Moliya boshqaruvi"),
     ("bozorlik", "Smart Bozorlik va savat"),
+    ("salomatlik", "Salomatlik va dorixona markazi"),
+    ("dorixona", "Uy aptechkasi"),
+    ("diagnostika", "Tizim diagnostikasi"),
     ("narx", "Mahsulot narxi va joylar tahlili"),
     ("obhavo", "Ob-havo va kiyim tavsiyasi"),
     ("hisob", "Xarajatlar kalkulyatori"),
@@ -117,12 +128,47 @@ def load_features() -> list:
     return loaded
 
 
+ERROR_ALERT_TIMESTAMPS: dict[str, list[float]] = {}
+MAX_ALERTS_PER_HOUR = 3
+
+
 def setup():
     app.dp.update.outer_middleware(OwnerOnly())
 
     @app.dp.errors()
     async def on_error(event: ErrorEvent):
-        app.log.exception(f"Kutilmagan xatolik: {event.exception}")
+        exc = event.exception
+        err_type = type(exc).__name__
+        err_msg = str(exc)
+        tb_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        ctx_info = str(getattr(event, "update", ""))
+
+        app.log.exception(f"Kutilmagan xatolik: {exc}")
+        try:
+            db.ins(
+                "INSERT INTO system_error_logs (error_type, error_message, traceback_text, context_info, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (err_type, err_msg, tb_text, ctx_info[:500], app.now().isoformat()),
+            )
+        except Exception as log_err:
+            app.log.error(f"Xatoni bazaga yozishda xatolik: {log_err}")
+
+        # Anti-spam: max 3 alerts per hour per error signature
+        sig = f"{err_type}:{err_msg}"
+        now_ts = app.now().timestamp()
+        history = [t for t in ERROR_ALERT_TIMESTAMPS.get(sig, []) if now_ts - t < 3600]
+        if len(history) < MAX_ALERTS_PER_HOUR:
+            history.append(now_ts)
+            ERROR_ALERT_TIMESTAMPS[sig] = history
+            try:
+                alert_text = (
+                    f"⚠️ <b>Tizimda xatolik yuz berdi!</b>\n"
+                    f"<b>Turi:</b> {app.esc(err_type)}\n"
+                    f"<b>Xabar:</b> <code>{app.esc(err_msg[:200])}</code>"
+                )
+                await messenger.send(alert_text, "system", bind_trigger=False)
+            except Exception:
+                pass
         return True
 
     features = load_features()
@@ -175,6 +221,7 @@ async def amain():
     if db.get_setting("epoch") is None:
         db.set_setting("epoch", app.now().replace(microsecond=0).isoformat())
     sv.seed_standard_reminders()
+    db.seed_health_data()
     setup()
     if "finance" in app.OPTIONAL:
         app.OPTIONAL["finance"].seed_finance_categories()

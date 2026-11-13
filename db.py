@@ -402,7 +402,95 @@ CREATE TABLE IF NOT EXISTS market_logs (
 CREATE INDEX IF NOT EXISTS idx_mkt_logs_item ON market_logs(item_id, location_id);
 """
 
-MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6]
+MIGRATION_7 = """
+CREATE TABLE IF NOT EXISTS health_categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'medicine',
+    icon TEXT DEFAULT '💊',
+    is_system BOOLEAN DEFAULT 0,
+    is_default BOOLEAN DEFAULT 1,
+    sort_order INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS health_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'medicine',
+    category_id INTEGER REFERENCES health_categories(id),
+    location TEXT NOT NULL DEFAULT 'home',
+    form TEXT DEFAULT 'tabletka',
+    default_dosage TEXT DEFAULT '',
+    remaining_quantity REAL DEFAULT 0,
+    unit TEXT DEFAULT 'dona',
+    low_stock_threshold REAL DEFAULT 2,
+    expiry_date DATE,
+    is_active BOOLEAN DEFAULT 1,
+    notes TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_health_items_loc ON health_items(location, is_active);
+
+CREATE TABLE IF NOT EXISTS health_item_categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER REFERENCES health_items(id),
+    category_id INTEGER REFERENCES health_categories(id)
+);
+
+CREATE TABLE IF NOT EXISTS health_intake_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER REFERENCES health_items(id),
+    course_id INTEGER,
+    taken_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    quantity REAL DEFAULT 1,
+    notes TEXT DEFAULT '',
+    status TEXT DEFAULT 'taken'
+);
+CREATE INDEX IF NOT EXISTS idx_health_intake_time ON health_intake_logs(item_id, taken_at);
+
+CREATE TABLE IF NOT EXISTS health_courses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    doctor_notes TEXT DEFAULT '',
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    is_active BOOLEAN DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS health_course_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER REFERENCES health_courses(id),
+    item_name TEXT NOT NULL,
+    schedule_times TEXT NOT NULL,
+    dose_quantity REAL DEFAULT 1,
+    dose_unit TEXT DEFAULT 'tabletka',
+    relation_to_food TEXT DEFAULT 'ovqatdan keyin',
+    is_active BOOLEAN DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS health_triage_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symptom_code TEXT UNIQUE NOT NULL,
+    symptom_name TEXT NOT NULL,
+    is_red_flag BOOLEAN DEFAULT 0,
+    natural_remedies TEXT DEFAULT '',
+    recommended_otc TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS system_error_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    error_type TEXT NOT NULL,
+    error_message TEXT NOT NULL,
+    traceback_text TEXT DEFAULT '',
+    context_info TEXT DEFAULT '',
+    occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_sys_err_time ON system_error_logs(occurred_at);
+"""
+
+MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7]
 LAST_MIGRATED_FROM: int | None = None
 
 REQUIRED_TABLES = (
@@ -698,3 +786,146 @@ def restore_from_file(src_path: str, stamp: str) -> str:
     backup_to(src_path, p)
     migrate()
     return safety_bak
+
+
+SEED_HEALTH_CATEGORIES = [
+    ("Og'riq va isitma", "medicine", "💊", 1, 1, 1),
+    ("Shamollash va gripp", "medicine", "🤧", 1, 1, 2),
+    ("Oshqozon va hazm", "medicine", "🫄", 1, 1, 3),
+    ("Allergiya", "medicine", "🌸", 1, 1, 4),
+    ("Antiseptik va bog'lov", "medicine", "🩹", 1, 1, 5),
+    ("Vitaminlar va minerallar", "medicine", "✨", 1, 1, 6),
+    ("Tozalash va yuvinish", "skincare", "🧼", 1, 1, 7),
+    ("Namlantirish va tiklash", "skincare", "🧴", 1, 1, 8),
+    ("Quyoshdan himoya (SPF)", "skincare", "☀️", 1, 1, 9),
+    ("Lab va qo'l parvarishi", "skincare", "💄", 1, 1, 10),
+]
+
+SEED_HEALTH_ITEMS = [
+    # (name, cat_name, kind, location, form, dosage, qty, unit, low_stock, notes)
+    ("Paratsetamol 500mg", "Og'riq va isitma", "medicine", "home", "tabletka", "1 tabletka", 10.0, "dona", 2.0, "Isitma va bosh og'rig'iga"),
+    ("Ibuprofen 400mg", "Og'riq va isitma", "medicine", "home", "tabletka", "1 tabletka", 10.0, "dona", 2.0, "Yallig'lanish va og'riq qoldiruvchi"),
+    ("No-shpa (Drotaverin) 40mg", "Og'riq va isitma", "medicine", "home", "tabletka", "1-2 tabletka", 8.0, "dona", 2.0, "Spazm va sanchiqqa qarshi"),
+    ("Mezim (Pankreatin)", "Oshqozon va hazm", "medicine", "home", "tabletka", "1-2 tabletka ovqat bilan", 12.0, "dona", 2.0, "Hazmni yaxshilash"),
+    ("Aktivirlangan ko'mir", "Oshqozon va hazm", "medicine", "home", "tabletka", "1 tabletka / 10 kg vaznga", 20.0, "dona", 5.0, "Zaharlanish va intoksikatsiyada"),
+    ("Tsetrin (Setirizin) 10mg", "Allergiya", "medicine", "home", "tabletka", "1 tabletka", 6.0, "dona", 2.0, "Allergiyaga qarshi"),
+    ("Pantenol krem", "Namlantirish va tiklash", "skincare", "home", "maz", "Zarur joyga yupqa surtish", 1.0, "dona", 1.0, "Kuyish va terini tiklash uchun"),
+    ("Xlorgeksidin 0.05%", "Antiseptik va bog'lov", "medicine", "home", "tomchi", "Zarur joyga surtish", 1.0, "dona", 1.0, "Antiseptik suyuqlik"),
+    ("Steril bint va leykoplastir", "Antiseptik va bog'lov", "medicine", "home", "boshqa", "Zaruratga ko'ra", 5.0, "dona", 2.0, "Bog'lov vositalari"),
+    ("Yumshoq yuvinish geli", "Tozalash va yuvinish", "skincare", "home", "boshqa", "Har tong va kechqurun", 1.0, "dona", 1.0, "Yuzni tozalash"),
+    ("Namlantiruvchi krem", "Namlantirish va tiklash", "skincare", "home", "maz", "Yuvinishdan so'ng", 1.0, "dona", 1.0, "Terini namlantirish"),
+    ("Quyoshdan himoya kremi SPF 50", "Quyoshdan himoya (SPF)", "skincare", "home", "maz", "Ko'chaga chiqishdan 15 daqiqa oldin", 1.0, "dona", 1.0, "UV himoya"),
+    ("Gigiyenik lab balzami", "Lab va qo'l parvarishi", "skincare", "bag", "boshqa", "Muntazam", 1.0, "dona", 1.0, "Lab yorilishidan himoya"),
+]
+
+SEED_TRIAGE_RULES = [
+    # (code, name, is_red_flag, natural_remedies, recommended_otc)
+    (
+        "chest_pain",
+        "Ko'krak qafasidagi qattiq / bosuvchi og'riq",
+        1,
+        "Harakatlanmang, o'tiring yoki yarim yotgan holatda bo'ling, kiyim yoqasini bo'shating, chuqur va sekin nafas oling. O'zingiz transport haydamang!",
+        "",
+    ),
+    (
+        "vomiting_blood",
+        "Qon qusish yoki to'q qora najas",
+        1,
+        "Hech narsa yemang va ichmang, qoringa sovuq kompress qo'ying, mutlaq tinch yoting.",
+        "",
+    ),
+    (
+        "fainting",
+        "Hushdan ketish, kutilmagan nutq yoki ko'rish buzilishi",
+        1,
+        "Bemorning oyoqlarini biroz baland ko'taring, toza havo oqimini ta'minlang, tinchlik bering.",
+        "",
+    ),
+    (
+        "stiff_neck_fever",
+        "Yuqori isitma (>39°C) + bo'yin qotishi yoki toshmalar",
+        1,
+        "Xonani shamollating, bemorga tinchlik bering, darhol tez tibbiy yordam chaqiring.",
+        "",
+    ),
+    (
+        "severe_breath",
+        "Og'ir nafas qisilishi, bo'g'ilish hissi",
+        1,
+        "Derazani oching, tik yoki yarim o'tirgan holatni egallang, tor kiyimlarni yeching.",
+        "",
+    ),
+    (
+        "headache",
+        "Bosh og'rig'i (yengil / o'rtacha)",
+        0,
+        "1-2 stakan iliq toza suv iching, qorong'i va tinch xonada 20 daqiqa ko'zlarni yumib dam oling, peshonaga salqin mato qo'ying.",
+        "Paratsetamol yoki Ibuprofen",
+    ),
+    (
+        "cold_flu",
+        "Shamollash / Burun oqishi / Yengil tomoq og'rig'i",
+        0,
+        "Ko'p miqdorda iliq suyuqlik (limonli choy, na'matak damlamasi) iching. Iliq tuzli suv bilan tomoqni chayqang, dam oling.",
+        "Paratsetamol, C vitamini, Tomoq pastilkasi",
+    ),
+    (
+        "stomach_heaviness",
+        "Oshqozonda og'irlik / Noqulaylik",
+        0,
+        "Og'ir va yog'li ovqatlardan saqlaning, yalpizli yoki moychechakli (romashka) iliq choy iching, biroz sekin piyoda yuring.",
+        "Mezim (Pankreatin)",
+    ),
+    (
+        "heartburn",
+        "Zarda (jig'ildon qaynashi)",
+        0,
+        "Yotmang (tik turing yoki o'tiring), 1 stakan iliq suv iching. Kofe, shokolad, achchiq va qovurilgan ovqatlarni cheklang.",
+        "Renni yoki Almagel",
+    ),
+    (
+        "fatigue",
+        "Charchoq / Madorsizlik",
+        0,
+        "To'liq 7-8 soat uxlashga harakat qiling, toza havoda 15 daqiqa sayr qiling, suv balansiga e'tibor bering.",
+        "Vitamin C, Multivitamin",
+    ),
+]
+
+
+def seed_health_data():
+    """Retseptsiz dorilar, gigiyena/skincare vositalari va triage qoidalarini bazaga yuklaydi."""
+    cat_map = {}
+    for name, kind, icon, is_sys, is_def, sort_o in SEED_HEALTH_CATEGORIES:
+        ex(
+            "INSERT INTO health_categories (name, kind, icon, is_system, is_default, sort_order) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET kind=excluded.kind, icon=excluded.icon",
+            (name, kind, icon, is_sys, is_def, sort_o),
+        )
+    for row in q("SELECT id, name FROM health_categories"):
+        cat_map[row["name"]] = row["id"]
+
+    for code, name, is_red, natural, otc in SEED_TRIAGE_RULES:
+        ex(
+            "INSERT INTO health_triage_rules (symptom_code, symptom_name, is_red_flag, natural_remedies, recommended_otc) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(symptom_code) DO UPDATE SET symptom_name=excluded.symptom_name, "
+            "is_red_flag=excluded.is_red_flag, natural_remedies=excluded.natural_remedies, recommended_otc=excluded.recommended_otc",
+            (code, name, is_red, natural, otc),
+        )
+
+    # Health items: agar birorta ham dori bo'lmasa, boshlang'ich zaxirani kiritamiz
+    count = q1("SELECT COUNT(*) AS c FROM health_items")["c"]
+    if count == 0:
+        for name, cat_name, kind, loc, form, dosage, qty, unit, low, notes in SEED_HEALTH_ITEMS:
+            cat_id = cat_map.get(cat_name)
+            item_id = ins(
+                "INSERT INTO health_items (name, kind, category_id, location, form, default_dosage, remaining_quantity, unit, low_stock_threshold, notes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, kind, cat_id, loc, form, dosage, qty, unit, low, notes),
+            )
+            if cat_id:
+                ins(
+                    "INSERT INTO health_item_categories (item_id, category_id) VALUES (?, ?)",
+                    (item_id, cat_id),
+                )
+

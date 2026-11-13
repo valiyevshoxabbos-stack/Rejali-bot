@@ -13,6 +13,7 @@ import feat_birthdays as birthdays
 import feat_challenges as challenges
 import feat_finance as finance
 import feat_journal as journal
+import feat_sleep as sleep
 import feat_weather as weather
 import messenger
 import qazo
@@ -68,7 +69,9 @@ def today_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🏆 Chelenjlar", callback_data="ch:home"),
         InlineKeyboardButton(text="💰 Moliya", callback_data="fn:home"),
     ], [
+        InlineKeyboardButton(text="💊 Dorixona", callback_data="hl:home"),
         InlineKeyboardButton(text="😴 Yotdim / Uyqu", callback_data="sl:menu"),
+    ], [
         InlineKeyboardButton(text="⏸ Pauza", callback_data="pz:open"),
     ]])
 
@@ -85,6 +88,8 @@ async def cmd_today(message: Message):
 
 async def send_morning():
     d = app.today()
+    if sleep.has_open_sleep():
+        sleep.auto_close_open_sleep(app.at(d, "06:30"))
     text = "🌅 <b>Xayrli tong!</b>\n\n" + await build_today_text()
     text += await weather.morning_weather_section()
     text += finance.morning_finance_section(d)
@@ -132,6 +137,20 @@ async def send_evening():
     )
 
 
+async def send_sunday_weekly_review():
+    sections = []
+    if "finance" in app.OPTIONAL:
+        fin_rep = app.OPTIONAL["finance"].render_weekly_finance_report()
+        sections.append(fin_rep)
+    if "health" in app.OPTIONAL:
+        health_rep = app.OPTIONAL["health"].render_weekly_health_report()
+        sections.append(health_rep)
+    if sections:
+        text = "📅 <b>Yakshanba oqshomi: Haftalik hisobot</b>\n\n" + "\n\n".join(sections)
+        await messenger.send(text, "summary", bind_trigger=False)
+
+
 def register_jobs(scheduler):
     scheduler.add_job(send_morning, CronTrigger(hour=6, minute=30), id="morning", replace_existing=True)
     scheduler.add_job(send_evening, CronTrigger(hour=21, minute=45), id="evening", replace_existing=True)
+    scheduler.add_job(send_sunday_weekly_review, CronTrigger(day_of_week="sun", hour=21, minute=0), id="sunday_weekly_review", replace_existing=True)

@@ -30,11 +30,11 @@ def add_menu_kb() -> InlineKeyboardMarkup:
         return InlineKeyboardButton(text=t, callback_data=d)
     return InlineKeyboardMarkup(inline_keyboard=[
         [b("🛒 Bozorlik", "mk:home"), b("💰 Moliya", "add:fin")],
-        [b("🏆 Chelenj", "add:chl"), b("📝 Eslatma", "add:rem")],
-        [b("🎂 Tug'ilgan kun", "add:bday"), b("⚖️ Vazn", "add:weight")],
-        [b("📝 Izoh", "add:note"), b("➕ Bajardim", "ql:list")],
-        [b("😴 Yotdim / Uyqu", "sl:menu"), b("🎂 Ro'yxat", "bd:list")],
-        [b("📒 Izohlar", "nt:list")],
+        [b("🏆 Chelenj", "add:chl"), b("💊 Dorixona", "hl:home")],
+        [b("📝 Eslatma", "add:rem"), b("🎂 Tug'ilgan kun", "add:bday")],
+        [b("⚖️ Vazn", "add:weight"), b("📝 Izoh", "add:note")],
+        [b("➕ Bajardim", "ql:list"), b("😴 Yotdim / Uyqu", "sl:menu")],
+        [b("🎂 Ro'yxat", "bd:list"), b("📒 Izohlar", "nt:list")],
     ])
 
 

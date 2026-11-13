@@ -1112,7 +1112,7 @@ def home_view() -> tuple[str, InlineKeyboardMarkup]:
         [btn("🛒 Bozorlik", "mk:home"), btn("💳 Hisoblar", "fn:accs")],
         [btn("🤝 Qarz / Haqlar", "fn:debts"), btn("🏦 Kreditlar", "fn:loans")],
         [btn("🏠 Davriy to'lovlar", "fn:recs"), btn("🗂 Kategoriyalar", "fn:cmng:exp:home")],
-        [btn("📜 Tarix", "fn:hist:0")],
+        [btn("📜 Tarix", "fn:hist:0"), btn("📊 Haftalik hisobot", "fn:week_rep")],
     ])
     return "\n".join(lines), kb
 
@@ -1177,6 +1177,97 @@ async def cb_history(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await state.clear()
     text, kb = history_view(page)
+    await _edit_or_send(cb.message, text, kb)
+
+
+def get_weekly_finance_summary(ref_date: date | None = None) -> dict:
+    d = ref_date or app.today()
+    monday = d - timedelta(days=d.weekday())
+    sunday = monday + timedelta(days=6)
+    prev_monday = monday - timedelta(days=7)
+    prev_sunday = monday - timedelta(days=1)
+
+    mon_start_iso = datetime(monday.year, monday.month, monday.day, 0, 0, tzinfo=app.TZ).isoformat()
+    sun_end_iso = datetime(sunday.year, sunday.month, sunday.day, 23, 59, 59, tzinfo=app.TZ).isoformat()
+    prev_start_iso = datetime(prev_monday.year, prev_monday.month, prev_monday.day, 0, 0, tzinfo=app.TZ).isoformat()
+    prev_end_iso = datetime(prev_sunday.year, prev_sunday.month, prev_sunday.day, 23, 59, 59, tzinfo=app.TZ).isoformat()
+
+    cur_row = db.q1(
+        "SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt "
+        "FROM finance_transactions WHERE from_account_id IS NOT NULL AND to_account_id IS NULL "
+        "AND created_at >= ? AND created_at <= ?",
+        (mon_start_iso, sun_end_iso),
+    )
+    cur_total = int(cur_row["total"]) if cur_row else 0
+    cur_count = int(cur_row["cnt"]) if cur_row else 0
+
+    prev_row = db.q1(
+        "SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt "
+        "FROM finance_transactions WHERE from_account_id IS NOT NULL AND to_account_id IS NULL "
+        "AND created_at >= ? AND created_at <= ?",
+        (prev_start_iso, prev_end_iso),
+    )
+    prev_total = int(prev_row["total"]) if prev_row else 0
+
+    delta_pct = None
+    if prev_total > 0:
+        delta_pct = round(((cur_total - prev_total) / prev_total) * 100, 1)
+
+    top3 = db.q(
+        "SELECT category, SUM(amount) AS cat_total, COUNT(*) AS cnt "
+        "FROM finance_transactions WHERE from_account_id IS NOT NULL AND to_account_id IS NULL "
+        "AND created_at >= ? AND created_at <= ? "
+        "GROUP BY category ORDER BY cat_total DESC LIMIT 3",
+        (mon_start_iso, sun_end_iso),
+    )
+
+    return {
+        "monday": monday,
+        "sunday": sunday,
+        "prev_monday": prev_monday,
+        "prev_sunday": prev_sunday,
+        "cur_total": cur_total,
+        "cur_count": cur_count,
+        "prev_total": prev_total,
+        "delta_pct": delta_pct,
+        "top3": top3,
+    }
+
+
+def render_weekly_finance_report(ref_date: date | None = None) -> str:
+    s = get_weekly_finance_summary(ref_date)
+    mon_s = s["monday"].strftime("%d.%m")
+    sun_s = s["sunday"].strftime("%d.%m")
+    lines = [
+        f"📊 <b>Moliyaviy haftalik hisobot ({mon_s} – {sun_s})</b>\n",
+        f"💸 <b>Joriy hafta xarajatlari:</b> {fmt_sum(s['cur_total'])} so'm ({s['cur_count']} ta amaliyot)",
+        f"🔙 <b>O'tgan hafta xarajatlari:</b> {fmt_sum(s['prev_total'])} so'm",
+    ]
+    if s["delta_pct"] is not None:
+        sign = "+" if s["delta_pct"] > 0 else ""
+        icon = "📈" if s["delta_pct"] > 0 else "📉"
+        lines.append(f"{icon} <b>O'tgan haftaga nisbatan:</b> {sign}{s['delta_pct']}%")
+    elif s["prev_total"] == 0 and s["cur_total"] > 0:
+        lines.append("📈 <b>O'tgan haftaga nisbatan:</b> yangi ma'lumotlar")
+    else:
+        lines.append("⚖️ <b>O'tgan haftaga nisbatan:</b> o'zgarmagan")
+
+    if s["top3"]:
+        lines.append("\n🏆 <b>Top-3 xarajat kategoriyalari:</b>")
+        for idx, cat in enumerate(s["top3"], 1):
+            pct_s = f" ({round(cat['cat_total'] / s['cur_total'] * 100)}%)" if s["cur_total"] > 0 else ""
+            lines.append(f"{idx}. {app.esc(cat['category'])}: <b>{fmt_sum(cat['cat_total'])} so'm</b>{pct_s}")
+    else:
+        lines.append("\n<i>Ushbu haftada xarajatlar qayd etilmagan.</i>")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "fn:week_rep")
+async def cb_weekly_report(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.clear()
+    text = render_weekly_finance_report()
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Moliya paneli", "fn:home")]])
     await _edit_or_send(cb.message, text, kb)
 
 

@@ -43,6 +43,7 @@ def home_kb() -> InlineKeyboardMarkup:
         [btn("🧹 Xabarlarni tozalash", "se:clean"), btn("😴 Uyqu", "se:sleep")],
         [btn("⚖️ Vazn", "se:weight"), btn("⏸ Pauza", "se:pause")],
         [btn("🗂 Ma'lumotlar", "se:data"), btn("ℹ️ Holat", "se:status")],
+        [btn("🛠 Texnik diagnostika", "se:diag")],
     ])
 
 
@@ -73,6 +74,16 @@ async def cb_home(cb: CallbackQuery):
 @router.callback_query(F.data == "se:status")
 async def cb_status(cb: CallbackQuery):
     await nav(cb, status.build_text(), [[BACK]])
+
+
+@router.callback_query(F.data == "se:diag")
+async def cb_settings_diag(cb: CallbackQuery):
+    if "health" in app.OPTIONAL:
+        diag_txt = app.OPTIONAL["health"].render_diagnostics()
+    else:
+        import feat_health
+        diag_txt = feat_health.render_diagnostics()
+    await nav(cb, diag_txt, [[btn("🔄 Yangilash", "se:diag"), BACK]])
 
 
 # ------------------------------------------------------------------ joylashuv

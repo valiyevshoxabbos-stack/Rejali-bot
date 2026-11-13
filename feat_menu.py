@@ -129,3 +129,8 @@ async def btn_calc(message: Message, state: FSMContext):
 @router.message(F.text == common.T_WEATHER)
 async def btn_weather(message: Message, state: FSMContext):
     await _optional_entry(message, state, "weather", "Ob-havo", "3.1")
+
+
+@router.message(F.text.in_({common.T_HEALTH, "💊 Salomatlik"}))
+async def btn_health(message: Message, state: FSMContext):
+    await _optional_entry(message, state, "health", "Dorixona", "3.7")

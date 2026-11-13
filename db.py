@@ -426,6 +426,7 @@ CREATE TABLE IF NOT EXISTS health_items (
     low_stock_threshold REAL DEFAULT 2,
     expiry_date DATE,
     is_active BOOLEAN DEFAULT 1,
+    is_seed BOOLEAN DEFAULT 0,
     notes TEXT DEFAULT '',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -913,19 +914,27 @@ def seed_health_data():
             (code, name, is_red, natural, otc),
         )
 
-    # Health items: agar birorta ham dori bo'lmasa, boshlang'ich zaxirani kiritamiz
+    # Health items: ma'lumotnoma katalogi sifatida yuklanadi (is_seed = 1, remaining_quantity = 0)
+    # Shaxsiy aptechka esa boshlanishida MUTLAQO BO'SH bo'ladi!
     count = q1("SELECT COUNT(*) AS c FROM health_items")["c"]
     if count == 0:
         for name, cat_name, kind, loc, form, dosage, qty, unit, low, notes in SEED_HEALTH_ITEMS:
             cat_id = cat_map.get(cat_name)
             item_id = ins(
-                "INSERT INTO health_items (name, kind, category_id, location, form, default_dosage, remaining_quantity, unit, low_stock_threshold, notes) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (name, kind, cat_id, loc, form, dosage, qty, unit, low, notes),
+                "INSERT INTO health_items (name, kind, category_id, location, form, default_dosage, remaining_quantity, unit, low_stock_threshold, is_seed, notes) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, ?, 1, ?)",
+                (name, kind, cat_id, loc, form, dosage, unit, low, notes),
             )
             if cat_id:
                 ins(
                     "INSERT INTO health_item_categories (item_id, category_id) VALUES (?, ?)",
                     (item_id, cat_id),
                 )
+    else:
+        # Mavjud bazadagi seed dorilarni ham katalog rejimiga o'tkazish (remaining_quantity = 0)
+        seed_names = [it[0] for it in SEED_HEALTH_ITEMS]
+        ex(
+            f"UPDATE health_items SET remaining_quantity = 0.0, is_seed = 1 WHERE name IN ({','.join('?' for _ in seed_names)})",
+            tuple(seed_names),
+        )
 

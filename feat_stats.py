@@ -15,8 +15,15 @@ import scoring
 
 router = Router()
 BARS = "▁▂▃▄▅▆▇█"
-SECTIONS = [("plan", "📋 Reja"), ("pray", "🕌 Namoz va qazo"), ("sleep", "😴 Uyqu"),
-            ("weight", "⚖️ Vazn"), ("market", "🛒 Bozorlik")]
+SECTIONS = [
+    ("plan", "📋 Reja"),
+    ("pray", "🕌 Namoz va qazo"),
+    ("sleep", "😴 Uyqu"),
+    ("weight", "⚖️ Vazn"),
+    ("market", "🛒 Bozorlik"),
+    ("finance", "💰 Moliya"),
+    ("health", "🏥 Sog'lom hafta"),
+]
 
 
 def bars(values: list[float]) -> str:
@@ -162,7 +169,29 @@ def market_text(period: str) -> str:
     return "\n".join(lines)
 
 
-RENDER = {"plan": plan_text, "pray": pray_text, "sleep": sleep_text, "weight": weight_text, "market": market_text}
+def finance_text(period: str) -> str:
+    if "finance" in app.OPTIONAL:
+        return app.OPTIONAL["finance"].render_weekly_finance_report()
+    import feat_finance
+    return feat_finance.render_weekly_finance_report()
+
+
+def health_text(period: str) -> str:
+    if "health" in app.OPTIONAL:
+        return app.OPTIONAL["health"].render_weekly_health_report()
+    import feat_health
+    return feat_health.render_weekly_health_report()
+
+
+RENDER = {
+    "plan": plan_text,
+    "pray": pray_text,
+    "sleep": sleep_text,
+    "weight": weight_text,
+    "market": market_text,
+    "finance": finance_text,
+    "health": health_text,
+}
 
 
 @router.message(Command("statistika"))
@@ -176,7 +205,7 @@ async def cb_menu(cb: CallbackQuery):
     await cb.message.edit_text("📊 <b>Statistika</b>: bo'limni tanlang", reply_markup=messenger.with_delete(menu_kb()))
 
 
-@router.callback_query(F.data.regexp(r"^sx:(plan|pray|sleep|weight|market):(week|month)$"))
+@router.callback_query(F.data.regexp(r"^sx:(plan|pray|sleep|weight|market|finance|health):(week|month)$"))
 async def cb_section(cb: CallbackQuery):
     _, key, period = cb.data.split(":")
     await cb.answer()

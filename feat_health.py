@@ -43,6 +43,7 @@ class HealthFSM(StatesGroup):
     item_dosage = State()
     item_qty = State()
     item_unit = State()
+    item_source = State()
     item_exp = State()
     item_notes = State()
     item_price = State()
@@ -105,17 +106,16 @@ async def _edit_or_send(target_msg, text: str, kb: InlineKeyboardMarkup | None):
 def main_health_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [btn("💊 Oddiy aptechka", "hl:ap:home:0"), btn("🩺 Davolanish kursi", "hl:cr:home")],
-        [btn("👨‍⚕️ Dorixonachi (Triage)", "hl:tr:home"), btn("🧴 Skin Care & Gigiyena", "hl:sk:home")],
-        [btn("📊 Sog'lom Hafta hisoboti", "hl:week_rep"), btn("🛠 Diagnostika", "hl:diag")],
+        [btn("👨‍⚕️ Dorixonachi (Simptomlar)", "hl:tr:home"), btn("🧴 Skin Care & Gigiyena", "hl:sk:home")],
     ])
 
 
 def main_health_view() -> tuple[str, InlineKeyboardMarkup]:
-    total_meds = db.q1("SELECT COUNT(*) AS c FROM health_items WHERE kind = 'medicine' AND is_active = 1")["c"]
-    total_skin = db.q1("SELECT COUNT(*) AS c FROM health_items WHERE kind = 'skincare' AND is_active = 1")["c"]
+    total_meds = db.q1("SELECT COUNT(*) AS c FROM health_items WHERE kind = 'medicine' AND is_active = 1 AND remaining_quantity > 0")["c"]
+    total_skin = db.q1("SELECT COUNT(*) AS c FROM health_items WHERE kind = 'skincare' AND is_active = 1 AND remaining_quantity > 0")["c"]
     active_courses = db.q1("SELECT COUNT(*) AS c FROM health_courses WHERE is_active = 1")["c"]
     low_stock = db.q1(
-        "SELECT COUNT(*) AS c FROM health_items WHERE is_active = 1 AND remaining_quantity <= low_stock_threshold"
+        "SELECT COUNT(*) AS c FROM health_items WHERE is_active = 1 AND remaining_quantity > 0 AND remaining_quantity <= low_stock_threshold"
     )["c"]
 
     lines = [
@@ -130,12 +130,16 @@ def main_health_view() -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), main_health_kb()
 
 
+async def entry(message: Message):
+    text, kb = main_health_view()
+    await messenger.send(with_footer(text), "info", kb)
+
+
 @router.message(Command("salomatlik"))
 @router.message(Command("dorixona"))
 async def cmd_health_home(message: Message, state: FSMContext):
     await state.clear()
-    text, kb = main_health_view()
-    await messenger.send(with_footer(text), "info", kb)
+    await entry(message)
 
 
 @router.callback_query(F.data == "hl:home")
@@ -150,7 +154,7 @@ async def cb_health_home(cb: CallbackQuery, state: FSMContext):
 
 def pharmacy_view(loc: str = "home", page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
     db.seed_health_data()
-    where = "WHERE is_active = 1"
+    where = "WHERE is_active = 1 AND remaining_quantity > 0"
     args = []
     if loc in ("home", "bag"):
         where += " AND location = ?"
@@ -171,7 +175,7 @@ def pharmacy_view(loc: str = "home", page: int = 0) -> tuple[str, InlineKeyboard
     loc_titles = {"home": "🏠 Uyda bor", "bag": "🎒 Sumkada", "all": "📦 Barcha vositalar"}
     lines = [f"💊 <b>Oddiy Aptechka</b> — <i>{loc_titles.get(loc, 'Roʻyxat')}</i>\n"]
     if not rows:
-        lines.append("Ushbu joylashuvda hech qanday vosita topilmadi.")
+        lines.append("Aptechkangizda hozircha dori yo'q.\n[➕ Yangi dori qo'shish] orqali shaxsiy zaxirangizni kiriting.")
     else:
         for r in rows:
             icon = r.get("cat_icon") or "💊"
@@ -229,9 +233,18 @@ def item_detail_view(item_id: int) -> tuple[str, InlineKeyboardMarkup]:
         return "⚠️ Vosita topilmadi.", InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Aptechka", "hl:ap:home:0")]])
 
     loc_name = "🏠 Uyda" if item["location"] == "home" else ("🎒 Sumkada" if item["location"] == "bag" else "Boshqa")
+    cat_rows = db.q(
+        "SELECT c.name, c.icon FROM health_item_categories ic JOIN health_categories c ON c.id = ic.category_id WHERE ic.item_id = ? ORDER BY c.sort_order, c.id",
+        (item_id,),
+    )
+    if cat_rows:
+        cat_disp = ", ".join(f"{c.get('icon') or ''} {c['name']}".strip() for c in cat_rows)
+    else:
+        cat_disp = item.get("cat_name") or "Umumiy"
+
     lines = [
         f"{item.get('cat_icon') or '💊'} <b>{app.esc(item['name'])}</b>\n",
-        f"📂 <b>Kategoriya:</b> {app.esc(item.get('cat_name') or 'Umumiy')}",
+        f"📂 <b>Kategoriya:</b> {app.esc(cat_disp)}",
         f"📍 <b>Joylashuvi:</b> {loc_name}",
         f"💊 <b>Shakli:</b> {app.esc(item['form'])}",
         f"🔢 <b>Doza:</b> {app.esc(item['default_dosage']) or 'belgilanmagan'}",
@@ -457,30 +470,75 @@ async def cb_start_add_item(cb: CallbackQuery, state: FSMContext):
     await _edit_or_send(cb.message, "➕ <b>Yangi dori/vosita qo'shish</b>\n\nVosita nomini kiriting (masalan: <code>Tsitramon</code>):", kb)
 
 
+def category_multiselect_kb(selected_ids: set[int]) -> InlineKeyboardMarkup:
+    cats = db.q("SELECT id, name, icon FROM health_categories ORDER BY sort_order, id")
+    rows = []
+    for c in cats:
+        cid = c["id"]
+        checked = "✅" if cid in selected_ids else "⬜"
+        icon = c.get("icon") or "💊"
+        title = f"{checked} {icon} {c['name']}"
+        rows.append([btn(title, f"hl:togcat:{cid}")])
+    cnt = len(selected_ids)
+    rows.append([btn(f"➡️ Davom etish (Tanlandi: {cnt} ta)", "hl:cat_done")])
+    rows.append([btn("❌ Bekor qilish", "hl:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 @router.message(HealthFSM.item_name)
 async def process_item_name(message: Message, state: FSMContext):
     name = (message.text or "").strip()
     if len(name) < 2:
         await messenger.send("⚠️ Nom kamida 2 belgidan iborat bo'lsin.", "info", bind_trigger=False)
         return
-    await state.update_data(item_name=name)
+    await state.update_data(item_name=name, selected_cats=[])
     await state.set_state(HealthFSM.item_cat)
 
-    cats = db.q("SELECT id, name, icon FROM health_categories ORDER BY sort_order, id")
-    rows = []
-    for c in cats:
-        rows.append([btn(f"{c.get('icon') or '💊'} {c['name']}", f"hl:setcat:{c['id']}")])
-    rows.append([btn("❌ Bekor qilish", "hl:home")])
+    kb = category_multiselect_kb(set())
     data = await state.get_data()
     mid = data.get("panel_mid")
-    await _edit_or_send(message if mid is None else None, f"<b>{app.esc(name)}</b> uchun kategoriyani tanlang:", InlineKeyboardMarkup(inline_keyboard=rows))
+    prompt = f"<b>{app.esc(name)}</b> uchun toifalarni tanlang (bir nechta tanlash mumkin):"
+    await _edit_or_send(message if mid is None else None, prompt, kb)
+
+
+@router.callback_query(HealthFSM.item_cat, F.data.startswith("hl:togcat:"))
+async def cb_toggle_cat(cb: CallbackQuery, state: FSMContext):
+    cid = int(cb.data.split(":")[2])
+    data = await state.get_data()
+    selected = set(data.get("selected_cats") or [])
+    if cid in selected:
+        selected.remove(cid)
+    else:
+        selected.add(cid)
+    await state.update_data(selected_cats=sorted(list(selected)))
+    await cb.answer()
+    name = data.get("item_name", "Dori")
+    prompt = f"<b>{app.esc(name)}</b> uchun toifalarni tanlang (bir nechta tanlash mumkin):"
+    kb = category_multiselect_kb(selected)
+    await _edit_or_send(cb.message, prompt, kb)
+
+
+@router.callback_query(HealthFSM.item_cat, F.data == "hl:cat_done")
+async def cb_cat_done(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = set(data.get("selected_cats") or [])
+    if not selected:
+        await cb.answer("Kamida 1 ta kategoriya tanlang!", show_alert=True)
+        return
+    await cb.answer()
+    await state.set_state(HealthFSM.item_loc)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn("🏠 Uyda (Aptechka)", "hl:setloc:home"), btn("🎒 Sumkada", "hl:setloc:bag")],
+        [btn("❌ Bekor qilish", "hl:home")],
+    ])
+    await _edit_or_send(cb.message, "Vosita qayerda saqlanadi?", kb)
 
 
 @router.callback_query(HealthFSM.item_cat, F.data.startswith("hl:setcat:"))
 async def cb_choose_cat(cb: CallbackQuery, state: FSMContext):
     cat_id = int(cb.data.split(":")[2])
     await cb.answer()
-    await state.update_data(item_cat=cat_id)
+    await state.update_data(item_cat=cat_id, selected_cats=[cat_id])
     await state.set_state(HealthFSM.item_loc)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [btn("🏠 Uyda (Aptechka)", "hl:setloc:home"), btn("🎒 Sumkada", "hl:setloc:bag")],
@@ -561,11 +619,6 @@ async def process_qty_msg(message: Message, state: FSMContext):
     await messenger.send(with_footer("Ushbu dori qanday kiritilmoqda?"), "info", kb)
 
 
-# Yangi sotib oldim -> Moliya integratsiyasi
-class HealthFSM(HealthFSM):
-    item_source = State()
-
-
 @router.callback_query(HealthFSM.item_source, F.data == "hl:src:home")
 async def cb_source_home(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
@@ -632,7 +685,8 @@ async def cb_buy_pay_acc(cb: CallbackQuery, state: FSMContext):
 
 async def _save_health_item(data: dict, price: float = 0, account_id: int | None = None) -> int:
     name = data["item_name"]
-    cat_id = data.get("item_cat")
+    selected_cats = data.get("selected_cats") or []
+    cat_id = selected_cats[0] if selected_cats else data.get("item_cat")
     loc = data.get("item_loc", "home")
     form = data.get("item_form", "tabletka")
     dosage = data.get("item_dosage", "1 dona")
@@ -640,11 +694,14 @@ async def _save_health_item(data: dict, price: float = 0, account_id: int | None
     unit = "dona"
 
     item_id = db.ins(
-        "INSERT INTO health_items (name, kind, category_id, location, form, default_dosage, remaining_quantity, unit, low_stock_threshold) "
-        "VALUES (?, 'medicine', ?, ?, ?, ?, ?, ?, 2.0)",
+        "INSERT INTO health_items (name, kind, category_id, location, form, default_dosage, remaining_quantity, unit, low_stock_threshold, is_seed) "
+        "VALUES (?, 'medicine', ?, ?, ?, ?, ?, ?, 2.0, 0)",
         (name, cat_id, loc, form, dosage, qty, unit),
     )
-    if cat_id:
+    if selected_cats:
+        for cid in selected_cats:
+            db.ex("INSERT INTO health_item_categories (item_id, category_id) VALUES (?, ?)", (item_id, cid))
+    elif cat_id:
         db.ex("INSERT INTO health_item_categories (item_id, category_id) VALUES (?, ?)", (item_id, cat_id))
 
     if price > 0 and account_id:
@@ -1014,10 +1071,10 @@ async def cb_triage_run(cb: CallbackQuery):
 # ------------------------------------------------------------------ 5. Skin Care & Tonggi Gigiyena
 
 def skincare_view() -> tuple[str, InlineKeyboardMarkup]:
-    items = db.q("SELECT * FROM health_items WHERE kind = 'skincare' AND is_active = 1")
+    items = db.q("SELECT * FROM health_items WHERE kind = 'skincare' AND is_active = 1 AND remaining_quantity > 0")
     lines = ["🧴 <b>Skin Care & Shaxsiy Parvarish javoni</b>\n"]
     if not items:
-        lines.append("Parvarish vositalari mavjud emas.")
+        lines.append("Parvarish javoningizda hozircha vosita yo'q.")
     else:
         for it in items:
             lines.append(f"• <b>{app.esc(it['name'])}</b>: {app.esc(it['notes'] or it['default_dosage'])}")

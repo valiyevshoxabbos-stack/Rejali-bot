@@ -718,13 +718,45 @@ def migrate() -> list[str]:
     return backups
 
 
+def ensure_health_items_columns():
+    """Mavjud Railway volume bazasida health_items jadvalining barcha kerakli ustunlari mavjudligini ta'minlaydi."""
+    try:
+        tables = {r["name"] for r in q("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "health_items" not in tables:
+            return
+        cols = {r["name"] for r in q("PRAGMA table_info(health_items)")}
+        needed = [
+            ("is_seed", "INTEGER DEFAULT 0"),
+            ("in_bag", "INTEGER DEFAULT 0"),
+            ("side_effect_flag", "INTEGER DEFAULT 0"),
+            ("expiry_date", "DATE"),
+            ("warnings", "TEXT DEFAULT ''"),
+            ("notes", "TEXT DEFAULT ''"),
+            ("low_stock_threshold", "REAL DEFAULT 2"),
+            ("default_dosage", "TEXT DEFAULT ''"),
+            ("form", "TEXT DEFAULT 'tabletka'"),
+            ("location", "TEXT DEFAULT 'home'"),
+            ("kind", "TEXT DEFAULT 'medicine'"),
+        ]
+        for col_name, col_def in needed:
+            if col_name not in cols:
+                try:
+                    ex(f"ALTER TABLE health_items ADD COLUMN {col_name} {col_def}")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 def init_db() -> list[str]:
     p = path()
     directory = os.path.dirname(p)
     if directory:
         os.makedirs(directory, exist_ok=True)
     _handle_legacy(p)
-    return migrate()
+    backups = migrate()
+    ensure_health_items_columns()
+    return backups
 
 
 def validate_backup_file(file_path: str) -> dict:
@@ -896,6 +928,10 @@ SEED_TRIAGE_RULES = [
 
 def seed_health_data():
     """Retseptsiz dorilar, gigiyena/skincare vositalari va triage qoidalarini bazaga yuklaydi."""
+    tables = {r["name"] for r in q("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "health_categories" not in tables or "health_items" not in tables:
+        return
+    ensure_health_items_columns()
     cat_map = {}
     for name, kind, icon, is_sys, is_def, sort_o in SEED_HEALTH_CATEGORIES:
         ex(
@@ -917,14 +953,23 @@ def seed_health_data():
     # Health items: ma'lumotnoma katalogi sifatida yuklanadi (is_seed = 1, remaining_quantity = 0)
     # Shaxsiy aptechka esa boshlanishida MUTLAQO BO'SH bo'ladi!
     count = q1("SELECT COUNT(*) AS c FROM health_items")["c"]
+    cols = {r["name"] for r in q("PRAGMA table_info(health_items)")}
+    has_is_seed = "is_seed" in cols
     if count == 0:
         for name, cat_name, kind, loc, form, dosage, qty, unit, low, notes in SEED_HEALTH_ITEMS:
             cat_id = cat_map.get(cat_name)
-            item_id = ins(
-                "INSERT INTO health_items (name, kind, category_id, location, form, default_dosage, remaining_quantity, unit, low_stock_threshold, is_seed, notes) "
-                "VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, ?, 1, ?)",
-                (name, kind, cat_id, loc, form, dosage, unit, low, notes),
-            )
+            if has_is_seed:
+                item_id = ins(
+                    "INSERT INTO health_items (name, kind, category_id, location, form, default_dosage, remaining_quantity, unit, low_stock_threshold, is_seed, notes) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, ?, 1, ?)",
+                    (name, kind, cat_id, loc, form, dosage, unit, low, notes),
+                )
+            else:
+                item_id = ins(
+                    "INSERT INTO health_items (name, kind, category_id, location, form, default_dosage, remaining_quantity, unit, low_stock_threshold, notes) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?)",
+                    (name, kind, cat_id, loc, form, dosage, unit, low, notes),
+                )
             if cat_id:
                 ins(
                     "INSERT INTO health_item_categories (item_id, category_id) VALUES (?, ?)",
@@ -933,8 +978,14 @@ def seed_health_data():
     else:
         # Mavjud bazadagi seed dorilarni ham katalog rejimiga o'tkazish (remaining_quantity = 0)
         seed_names = [it[0] for it in SEED_HEALTH_ITEMS]
-        ex(
-            f"UPDATE health_items SET remaining_quantity = 0.0, is_seed = 1 WHERE name IN ({','.join('?' for _ in seed_names)})",
-            tuple(seed_names),
-        )
+        if has_is_seed:
+            ex(
+                f"UPDATE health_items SET remaining_quantity = 0.0, is_seed = 1 WHERE name IN ({','.join('?' for _ in seed_names)})",
+                tuple(seed_names),
+            )
+        else:
+            ex(
+                f"UPDATE health_items SET remaining_quantity = 0.0 WHERE name IN ({','.join('?' for _ in seed_names)})",
+                tuple(seed_names),
+            )
 

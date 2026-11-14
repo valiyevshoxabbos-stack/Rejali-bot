@@ -51,6 +51,13 @@ CHANGELOGS: dict[str, str] = {
         "• 📅 <b>2026-2027 Ta'til va bayramlar taqvimi:</b> Dam olish kunlarida dars eslatmalari avtomatik to'xtatiladi.\n"
         "• 🧹 <b>Eski maktab va universitet eslatmalari to'liq tozalandi.</b>"
     ),
+    "3.8.1": (
+        "🚀 <b>AltronBek v3.8.1 yangilanishi muvaffaqiyatli o'rnatildi!</b>\n"
+        "• ⏰ <b>Dars eslatmalari barqarorligi:</b> Kechki 20:00 preview saqlanishi va dars jadvali o'zgarganda darhol rejalashtirish tuzatildi.\n"
+        "• 🌅 <b>06:30 Tonggi Xulosa:</b> Bugungi maktab darslari, mavzulari va izohlari to'g'ridan-to'g'ri tonggi xabarda chiqadi.\n"
+        "• ⏭ <b>Navbatdagi dars ko'rsatkichi:</b> Dars tugaganda 10 daqiqadan so'ng boshlanadigan keyingi dars haqida darhol bildirishnoma beriladi.\n"
+        "• 📋 <b>Tezkor ko'rsatkich:</b> Maktab menyusiga «Bugungi / Ertagi darslar» tugmasi qo'shildi."
+    ),
 }
 
 COMMANDS = [

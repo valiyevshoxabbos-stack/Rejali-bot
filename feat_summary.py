@@ -1,6 +1,7 @@
 """Kunlik xulosa: /bugun, ertalabki (06:30) va kechki (21:45) xabarlar."""
 
 import asyncio
+from datetime import date
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -41,6 +42,32 @@ async def prayer_times_today() -> dict | None:
         return None
 
 
+def school_today_section(d: date) -> str:
+    if "education" not in app.OPTIONAL:
+        return ""
+    edu = app.OPTIONAL["education"]
+    off, off_title, off_type = edu.is_off_day(d)
+    if off or d.weekday() >= 6:
+        return ""
+    slots = [s for s in edu.get_timetable_for_day(d.weekday()) if s.get("course_id")]
+    if not slots:
+        return ""
+    lines = ["\n🎓 <b>Bugungi maktab darslari:</b>"]
+    for s in slots:
+        p = s["period_number"]
+        c_name = s["class_name"]
+        s_name = s["subject_name"]
+        start_t, _ = edu.EDU_BELLS[p]
+        c_order = s["current_topic_order"]
+        topic = db.q1("SELECT title FROM edu_topics WHERE course_id = ? AND topic_order = ?", (s["course_id"], c_order))
+        t_title = f": <i>{app.esc(topic['title'])}</i>" if topic else ""
+        lines.append(f"• <b>{p}-soat ({start_t}):</b> {app.esc(c_name)} — {app.esc(s_name)} (№{c_order}{t_title})")
+        notes = edu.get_unresolved_notes(s["course_id"])
+        if notes:
+            lines.append("  📌 <i>Izoh:</i> " + "; ".join(app.esc(n["note_text"]) for n in notes))
+    return "\n".join(lines)
+
+
 async def build_today_text() -> str:
     d = app.today()
     items = []
@@ -58,6 +85,9 @@ async def build_today_text() -> str:
     lines += [f"🕒 {t} — {label}" for t, label in items]
     if not items:
         lines.append("Bugun reja yo'q.")
+    edu_text = school_today_section(d)
+    if edu_text:
+        lines.append(edu_text)
     return "\n".join(lines)
 
 
@@ -69,9 +99,10 @@ def today_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🏆 Chelenjlar", callback_data="ch:home"),
         InlineKeyboardButton(text="💰 Moliya", callback_data="fn:home"),
     ], [
+        InlineKeyboardButton(text="🎓 Maktab", callback_data="ed:home"),
         InlineKeyboardButton(text="💊 Dorixona", callback_data="hl:home"),
-        InlineKeyboardButton(text="😴 Yotdim / Uyqu", callback_data="sl:menu"),
     ], [
+        InlineKeyboardButton(text="😴 Yotdim / Uyqu", callback_data="sl:menu"),
         InlineKeyboardButton(text="⏸ Pauza", callback_data="pz:open"),
     ]])
 

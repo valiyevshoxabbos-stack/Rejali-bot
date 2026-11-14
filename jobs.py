@@ -15,7 +15,7 @@ import qazo as qz
 import services as sv
 
 PRAYERS = ("Bomdod", "Peshin", "Asr", "Shom", "Xufton")
-JOB_PREFIXES = ("rem_", "info_", "qazo_dl_", "edu_")
+JOB_PREFIXES = ("rem_", "info_", "qazo_dl_", "edu_pre_", "edu_post_")
 
 
 async def send_info(text: str):

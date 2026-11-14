@@ -19,7 +19,7 @@ from aiogram.enums import ParseMode  # noqa: E402
 from aiogram.fsm.storage.memory import MemoryStorage  # noqa: E402
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # noqa: E402
 
-VERSION = "3.8"
+VERSION = "3.8.1"
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "123456789:AAFakeTestTokenForAltronBek35")
 CHAT_ID = int(os.environ.get("CHAT_ID", "777000"))

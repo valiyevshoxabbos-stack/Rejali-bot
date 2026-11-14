@@ -43,7 +43,7 @@ EDU_BELLS: dict[int, tuple[str, str]] = {
     6: ("12:40", "13:25"),
 }
 
-WEEKDAY_NAMES_UZ = ["Dushanba", "Seshanba", "Chorshanba", "Payshanba", "Juma", "Shanba"]
+WEEKDAY_NAMES_UZ = ["Dushanba", "Seshanba", "Chorshanba", "Payshanba", "Juma", "Shanba", "Yakshanba"]
 PAGE_SIZE = 8
 
 
@@ -378,8 +378,8 @@ def main_edu_view() -> tuple[str, InlineKeyboardMarkup]:
         lines.append("🔔 <b>Bugun Yakshanba:</b> Darslar yo'q.")
 
     kb_rows = [
-        [btn("📚 Sinflar va Fanlar", "ed:courses"), btn("🗓 Dars jadvali", f"ed:tt:{min(today_wd, 5)}")],
-        [btn("📅 Ta'til va Bayramlar", "ed:cal:0"), btn("🔔 Bugungi darslar", "ed:today")],
+        [btn("📋 Bugungi / Ertagi darslar", "ed:peek"), btn("🗓 Dars jadvali", f"ed:tt:{min(today_wd, 5)}")],
+        [btn("📚 Sinflar va Fanlar", "ed:courses"), btn("📅 Ta'til va Bayramlar", "ed:cal:0")],
     ]
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
@@ -599,10 +599,57 @@ def calendar_view(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
+def format_day_schedule(d: date, title_prefix: str) -> list[str]:
+    off, off_title, off_type = is_off_day(d)
+    if off:
+        t_type = "Ta'til" if off_type == "vacation" else "Bayram"
+        return [f"<b>{title_prefix} ({WEEKDAY_NAMES_UZ[d.weekday()]}, {d.strftime('%d.%m')}):</b>", f"🏖 Dam olish kuni ({t_type}): {app.esc(off_title)}\n"]
+    if d.weekday() >= 6:
+        return [f"<b>{title_prefix} ({WEEKDAY_NAMES_UZ[d.weekday()]}, {d.strftime('%d.%m')}):</b>", "🔔 Yakshanba: darslar yo'q.\n"]
+    slots = [s for s in get_timetable_for_day(d.weekday()) if s.get("course_id")]
+    if not slots:
+        return [f"<b>{title_prefix} ({WEEKDAY_NAMES_UZ[d.weekday()]}, {d.strftime('%d.%m')}):</b>", "<i>(Dars jadvali bo'sh)</i>\n"]
+    lines = [f"<b>{title_prefix} ({WEEKDAY_NAMES_UZ[d.weekday()]}, {d.strftime('%d.%m')}):</b>"]
+    for s in slots:
+        p = s["period_number"]
+        c_name = s["class_name"]
+        s_name = s["subject_name"]
+        start_t, end_t = EDU_BELLS[p]
+        c_order = s["current_topic_order"]
+        topic = db.q1("SELECT title, homework, topic_type FROM edu_topics WHERE course_id = ? AND topic_order = ?", (s["course_id"], c_order))
+        t_icon = "🔬 " if topic and topic["topic_type"] == "lab" else ("📝 " if topic and topic["topic_type"] == "exam" else "")
+        t_str = f"📖 {t_icon}Mavzu №{c_order}: <i>{app.esc(topic['title'])}</i>" if topic else f"📖 Mavzu №{c_order}"
+        hw_str = f" | 🏠 Uyga: <i>{app.esc(topic['homework'])}</i>" if topic and topic.get("homework") else ""
+        lines.append(f"• <b>{p}-soat ({start_t}–{end_t}):</b> <b>{app.esc(c_name)}</b> — {app.esc(s_name)}\n  {t_str}{hw_str}")
+        notes = get_unresolved_notes(s["course_id"])
+        if notes:
+            lines.append("  📌 <i>Sinf eslatmasi:</i> " + "; ".join(app.esc(n["note_text"]) for n in notes))
+    lines.append("")
+    return lines
+
+
+def schedule_peek_view() -> tuple[str, InlineKeyboardMarkup]:
+    today = app.today()
+    tomorrow = today + timedelta(days=1)
+    lines = ["📋 <b>Bugungi va Ertangi Darslar Ko'rsatkichi</b>\n"]
+    lines.extend(format_day_schedule(today, "🔔 Bugun"))
+    lines.extend(format_day_schedule(tomorrow, "📚 Ertaga"))
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn("🔄 Yangilash", "ed:peek"), btn("🗓 Haftalik jadval", f"ed:tt:{min(today.weekday(), 5)}")],
+        [btn("⬅️ Maktab menyusi", "ed:home")],
+    ])
+    return "\n".join(lines).strip(), kb
+
+
 # ------------------------------------------------------------------ 7. APScheduler Dars Eslatmalari
 
 async def schedule_today_lessons():
     """Bugungi kun uchun 10 daqiqa oldin eslatma va tugash vaqtida tasdiqlash joblarini qo'yadi."""
+    # 1. Avval mavjud edu_pre_* va edu_post_* joblarini tozalash
+    for job in app.scheduler.get_jobs():
+        if job.id.startswith(("edu_pre_", "edu_post_")):
+            job.remove()
+
     today = app.today()
     off, off_title, _ = is_off_day(today)
     if off:
@@ -626,12 +673,12 @@ async def schedule_today_lessons():
         start_dt = app.at(today, start_s)
         end_dt = app.at(today, end_s)
 
-        # 10 daqiqa oldin ogohlantirish
+        # 10 daqiqa oldin ogohlantirish (faqat run_at > now bo'lsa)
         warn_dt = start_dt - timedelta(minutes=10)
         if warn_dt > now:
             app.schedule_job(warn_dt, send_pre_lesson_reminder, [p, cid], f"edu_pre_{p}_{cid}")
 
-        # Dars tugashida tasdiqlash
+        # Dars tugashida tasdiqlash (faqat run_at > now bo'lsa)
         if end_dt > now:
             app.schedule_job(end_dt, send_post_lesson_confirmation, [p, cid], f"edu_post_{p}_{cid}")
 
@@ -735,6 +782,25 @@ async def send_post_lesson_confirmation(period: int, course_id: int):
         f"🏁 <b>{app.esc(c['class_name'])} ({app.esc(c['subject_name'])})</b> darsi tugadi.\n\n"
         f"Mavzu №{c_order} (<i>{app.esc(t_name)}</i>) o'tildimi?"
     )
+
+    # Keyingi dars ko'rsatkichi (agar bugun keyingi soatda yana dars bo'lsa)
+    today_wd = today.weekday()
+    slots = get_timetable_for_day(today_wd)
+    next_slots = [s for s in slots if s.get("course_id") and s["period_number"] > period]
+    if next_slots:
+        ns = next_slots[0]
+        np = ns["period_number"]
+        nc_name = ns["class_name"]
+        ns_name = ns["subject_name"]
+        nstart_t, _ = EDU_BELLS[np]
+        nc_order = ns["current_topic_order"]
+        ntopic = db.q1("SELECT title FROM edu_topics WHERE course_id = ? AND topic_order = ?", (ns["course_id"], nc_order))
+        ntitle = f" — <i>{app.esc(ntopic['title'])}</i>" if ntopic else ""
+        text += f"\n\n⏭ <b>Keyingi dars ({np}-soat, {nstart_t}):</b> {app.esc(nc_name)} {app.esc(ns_name)} — Mavzu №{nc_order}{ntitle}"
+        nnotes = get_unresolved_notes(ns["course_id"])
+        if nnotes:
+            text += "\n📌 <i>Sinf eslatmasi:</i> " + "; ".join(app.esc(n["note_text"]) for n in nnotes)
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [btn("✅ O'tildi (Keyingi mavzuga)", f"ed:done:{course_id}:{c_order}")],
         [btn("⏭ O'tilmadi (Keyingisiga qoldi)", f"ed:skip:{course_id}:{c_order}")],
@@ -842,6 +908,7 @@ async def cb_set_slot_val(cb: CallbackQuery, state: FSMContext):
     cid = int(parts[4])
     set_timetable_slot(wd, p, None if cid == 0 else cid)
     await cb.answer("Jadval yangilandi!")
+    await schedule_today_lessons()
     text, kb = timetable_view(wd)
     await _edit_or_send(cb.message, text, kb)
 
@@ -1030,8 +1097,17 @@ async def process_excel_doc(message: Message, state: FSMContext):
 async def cb_del_course(cb: CallbackQuery):
     cid = int(cb.data.split(":")[2])
     delete_course(cid)
+    await schedule_today_lessons()
     await cb.answer("Sinf o'chirildi!")
     text, kb = courses_list_view()
+    await _edit_or_send(cb.message, text, kb)
+
+
+@router.callback_query(F.data == "ed:peek")
+async def cb_schedule_peek(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.clear()
+    text, kb = schedule_peek_view()
     await _edit_or_send(cb.message, text, kb)
 
 
@@ -1039,23 +1115,7 @@ async def cb_del_course(cb: CallbackQuery):
 async def cb_edu_today(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await state.clear()
-    today = app.today()
-    off, off_title, off_type = is_off_day(today)
-    if off:
-        type_str = "Ta'til" if off_type == "vacation" else "Bayram"
-        text = f"🏖 <b>Bugun dam olish kuni ({type_str}): {app.esc(off_title)}</b>\n\nDarslar o'tilmaydi."
-        kb = InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Maktab", "ed:home")]])
-        await _edit_or_send(cb.message, text, kb)
-        return
-
-    today_wd = today.weekday()
-    if today_wd >= 6:
-        text = "🔔 <b>Bugun Yakshanba:</b> Darslar yo'q."
-        kb = InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Maktab", "ed:home")]])
-        await _edit_or_send(cb.message, text, kb)
-        return
-
-    text, kb = timetable_view(today_wd)
+    text, kb = schedule_peek_view()
     await _edit_or_send(cb.message, text, kb)
 
 

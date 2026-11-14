@@ -541,33 +541,3 @@ def analyze_weather_for_date(raw: dict, target_date: date) -> dict | None:
         "rain_span": f"{rain_pts[0]['hour']:02d}:00–{min(22, rain_pts[-1]['hour'] + 1):02d}:00" if rain_pts else None,
         "elevation": raw.get("elevation"),
     }
-
-
-# ------------------------------------------------------------------ maktab va universitet
-
-def school_classes(weekday: int) -> list[str]:
-    raw = db.get_setting(f"school_classes_{weekday}")
-    return raw.split(",") if raw else sd.SCHOOL_CLASSES.get(weekday, [])
-
-
-def set_school_classes(weekday: int, classes: list[str]):
-    db.set_setting(f"school_classes_{weekday}", ",".join(classes))
-
-
-def school_lesson_reminders(d: date) -> list[dict]:
-    """Har dars tugashidan 5 daqiqa oldin keyingi dars sinfi (ma'lumot, ballsiz)."""
-    classes = school_classes(d.weekday())
-    out = []
-    for i in range(len(classes) - 1):
-        _, end = sd.SCHOOL_BELLS[i + 1]
-        out.append({"at": app.at(d, end) - timedelta(minutes=5),
-                    "text": f"Keyingi dars: {i + 2}-soat, {classes[i + 1]}"})
-    return out
-
-
-def university_reminder(d: date) -> dict | None:
-    lessons = sd.UNIVERSITY.get(d.weekday())
-    if not lessons:
-        return None
-    lines = [f"{s}-{e}  {name} ({room})" for s, e, name, room in lessons]
-    return {"at": app.at(d, "12:45"), "text": "Bugungi universitet darslari:\n" + "\n".join(lines)}

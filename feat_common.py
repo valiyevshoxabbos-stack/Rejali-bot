@@ -54,17 +54,17 @@ async def clear_prompts(state: FSMContext):
 
 T_TODAY, T_ADD = "📅 Bugun", "➕ Qo'shish"
 T_CHALLENGES, T_FINANCE = "🏆 Chelenjlar", "💰 Moliya"
+T_EDU, T_HEALTH = "🎓 Maktab", "💊 Dorixona"
 T_CALC, T_WEATHER = "🧮 Hisob", "🌦 Ob-havo"
 T_STATS, T_SETTINGS = "📊 Statistika", "⚙️ Sozlamalar"
-T_HEALTH = "💊 Dorixona"
-MENU_TEXTS = {T_TODAY, T_ADD, T_CHALLENGES, T_FINANCE, T_CALC, T_WEATHER, T_STATS, T_SETTINGS, T_HEALTH}
+MENU_TEXTS = {T_TODAY, T_ADD, T_CHALLENGES, T_FINANCE, T_EDU, T_HEALTH, T_CALC, T_WEATHER, T_STATS, T_SETTINGS, "🎓 Ta'lim"}
 
 
 def main_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=T_TODAY), KeyboardButton(text=T_ADD)],
                   [KeyboardButton(text=T_CHALLENGES), KeyboardButton(text=T_FINANCE)],
-                  [KeyboardButton(text=T_HEALTH), KeyboardButton(text=T_CALC)],
-                  [KeyboardButton(text=T_WEATHER), KeyboardButton(text=T_STATS)],
-                  [KeyboardButton(text=T_SETTINGS)]],
+                  [KeyboardButton(text=T_EDU), KeyboardButton(text=T_HEALTH)],
+                  [KeyboardButton(text=T_CALC), KeyboardButton(text=T_WEATHER)],
+                  [KeyboardButton(text=T_STATS), KeyboardButton(text=T_SETTINGS)]],
         resize_keyboard=True, is_persistent=True)

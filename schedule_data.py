@@ -47,30 +47,3 @@ WEEKLY = {
 
 PRAYER_NAMES = ["Bomdod", "Peshin", "Asr", "Shom", "Xufton"]
 
-# Maktab: I-smena qo'ng'iroq vaqtlari (dars raqami -> (kirish, chiqish))
-SCHOOL_BELLS = {
-    1: ("08:00", "08:45"), 2: ("08:55", "09:40"), 3: ("09:50", "10:35"),
-    4: ("10:50", "11:35"), 5: ("11:45", "12:30"), 6: ("12:40", "13:25"), 7: ("13:30", "14:15"),
-}
-
-# Maktab sinflari tartibi (bot orqali /sinf bilan o'zgartiriladi)
-SCHOOL_CLASSES = {
-    4: ["7b", "8b", "11b", "9b", "10b"],   # Juma
-    5: ["7b", "8b", "10b", "11b", "9b"],   # Shanba
-}
-
-# Universitet jadvali (23/3 guruh), (boshlanish, tugash, fan, xona)
-UNIVERSITY = {
-    0: [("13:40", "15:00", "Astrofizika (m)", "1/405"),
-        ("15:10", "16:30", "Yadro va elementar zarralar fizikasi (m)", "1/405"),
-        ("16:40", "18:00", "Astrofizika (a)", "1/404")],
-    1: [("13:40", "15:00", "Lazer fizikasi (m)", "1/405"),
-        ("15:10", "16:30", "Yadro va elementar zarralar fizikasi (a)", "1/404"),
-        ("16:40", "18:00", "Fizikadan masalalar yechish metodikasi (s)", "1/404")],
-    2: [("13:40", "15:00", "Fizika o'qitish metodikasi II (m)", "1/405"),
-        ("15:10", "16:30", "Fizikadan masalalar yechish metodikasi (a)", "1/404"),
-        ("16:40", "18:00", "SCIENCE fanini o'qitish metodikasi (s)", "1/404")],
-    3: [("13:40", "15:00", "SCIENCE fanini o'qitish metodikasi (m)", "1/405"),
-        ("15:10", "16:30", "Lazer fizikasi (s)", "1/404"),
-        ("16:40", "18:00", "Fizika o'qitish metodikasi (l)", "1/107")],
-}

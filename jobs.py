@@ -15,7 +15,7 @@ import qazo as qz
 import services as sv
 
 PRAYERS = ("Bomdod", "Peshin", "Asr", "Shom", "Xufton")
-JOB_PREFIXES = ("rem_", "info_", "uni_", "qazo_dl_")
+JOB_PREFIXES = ("rem_", "info_", "qazo_dl_", "edu_")
 
 
 async def send_info(text: str):
@@ -76,14 +76,20 @@ async def schedule_today():
         # Kechagi Xufton qazosi (bugungi Bomdod + 15 daqiqa)
         app.schedule_job(dts[0] + timedelta(minutes=qz.QAZO_GRACE_MINUTES), feat_qazo.check_qazo, [], "qazo_dl_prev")
 
-    if not sv.pause_active(today):
-        for item in sv.school_lesson_reminders(today):
-            app.schedule_job(item["at"], send_info, [item["text"]], f"info_{item['at'].strftime('%H%M')}")
-        uni = sv.university_reminder(today)
-        if uni:
-            app.schedule_job(uni["at"], send_info, [uni["text"]], "uni_info")
+    if "education" in app.OPTIONAL:
+        try:
+            await app.OPTIONAL["education"].schedule_today_lessons()
+        except Exception as e:
+            app.log.warning(f"Maktab darslarini rejalashtirishda xatolik: {e}")
     app.log.info(f"{today} uchun eslatmalar rejalashtirildi.")
 
 
 def register_jobs(scheduler):
     scheduler.add_job(schedule_today, CronTrigger(hour=0, minute=5), id="daily_scheduler", replace_existing=True)
+    if "education" in app.OPTIONAL:
+        scheduler.add_job(
+            app.OPTIONAL["education"].send_evening_preview,
+            CronTrigger(hour=20, minute=0),
+            id="edu_evening_preview",
+            replace_existing=True,
+        )

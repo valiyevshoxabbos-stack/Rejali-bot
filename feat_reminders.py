@@ -689,21 +689,6 @@ async def cmd_custom_points(message: Message):
     await messenger.send(f"✅ #{parts[1]} → {parts[2]} ball" if n else f"#{parts[1]} topilmadi.", "confirm")
 
 
-@router.message(Command("sinf"))
-async def cmd_school(message: Message):
-    """/sinf juma 7b 8b 11b 9b 10b"""
-    parts = (message.text or "").split()
-    if len(parts) < 3 or parts[1].lower() not in sv.WEEKDAY_LOOKUP or len(parts) > 9:
-        await messenger.send("Format: <code>/sinf juma 7b 8b 11b 9b 10b</code>", "confirm")
-        return
-    wd = sv.WEEKDAY_LOOKUP[parts[1].lower()]
-    sv.set_school_classes(wd, parts[2:])
-    if wd == app.today().weekday():
-        import jobs
-        await jobs.schedule_today()
-    await messenger.send(f"✅ {sv.WEEKDAY_NAMES[wd]}: {', '.join(parts[2:])}", "confirm")
-
-
 class NoteState(StatesGroup):
     waiting = State()
 

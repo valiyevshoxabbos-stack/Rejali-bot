@@ -24,7 +24,7 @@ CORE = [
     "menu", "reminders", "qazo", "sleep", "birthdays", "weight",
     "stats", "settings", "cleanup", "summary", "status", "restore",
 ]
-OPTIONAL = ["weather", "calculator", "challenges", "finance", "market", "health"]
+OPTIONAL = ["weather", "calculator", "challenges", "finance", "market", "health", "education"]
 
 CHANGELOGS: dict[str, str] = {
     "3.6": (
@@ -41,10 +41,22 @@ CHANGELOGS: dict[str, str] = {
         "• 👨‍⚕️ <b>Virtual Dorixonachi:</b> Belgilar tahlili, xavf (Red Flag) filtri va tabiiy tavsiyalar.\n"
         "• 🧴 <b>Skin Care & Tonggi gigiyena:</b> Har kunlik 06:45 parvarish va ob-havoga mos himoya."
     ),
+    "3.8": (
+        "🚀 <b>AltronBek v3.8 yangilanishi muvaffaqiyatli o'rnatildi!</b>\n"
+        "• 🎓 <b>Maktab Ta'lim Moduli:</b> O'qituvchi uchun to'liq dinamik dars va TMR boshqaruvi.\n"
+        "• 📥 <b>Excel (.xlsx) TMR Importer:</b> Taqvim-mavzu rejalarni fayldan yuklash va joriy mavzuni tanlash.\n"
+        "• 🔬 <b>Laboratoriya va Nazorat ogohlantirishlari:</b> 1 kun oldin (20:00 da) reja va maxsus eslatmalar.\n"
+        "• 🔔 <b>Darsdan 10 daqiqa oldin eslatma:</b> Mavzu, uy ishi va sinfga oid maxsus eslatmalar.\n"
+        "• 🏁 <b>Dars tasdiqlash:</b> Dars tugaganda o'tildimi so'rovi va avtomatik keyingi mavzuga siljitish.\n"
+        "• 📅 <b>2026-2027 Ta'til va bayramlar taqvimi:</b> Dam olish kunlarida dars eslatmalari avtomatik to'xtatiladi.\n"
+        "• 🧹 <b>Eski maktab va universitet eslatmalari to'liq tozalandi.</b>"
+    ),
 }
 
 COMMANDS = [
     ("bugun", "Bugungi reja"),
+    ("maktab", "Maktab ta'lim moduli (darslar, TMR, jadval)"),
+    ("talim", "Maktab ta'lim moduli"),
     ("chelenjlar", "Chelenjlar paneli"),
     ("moliya", "Moliya boshqaruvi"),
     ("bozorlik", "Smart Bozorlik va savat"),
@@ -222,6 +234,7 @@ async def amain():
         db.set_setting("epoch", app.now().replace(microsecond=0).isoformat())
     sv.seed_standard_reminders()
     db.seed_health_data()
+    db.seed_edu_data()
     setup()
     if "finance" in app.OPTIONAL:
         app.OPTIONAL["finance"].seed_finance_categories()

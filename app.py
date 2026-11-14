@@ -1,5 +1,5 @@
 """
-AltronBek 3.7: umumiy ob'ektlar (bot, dispatcher, scheduler) va yordamchilar.
+AltronBek 3.8: umumiy ob'ektlar (bot, dispatcher, scheduler) va yordamchilar.
 Barcha modullar shu faylni `import app` qilib ishlatadi (vaqt uchun app.now()).
 """
 
@@ -19,10 +19,10 @@ from aiogram.enums import ParseMode  # noqa: E402
 from aiogram.fsm.storage.memory import MemoryStorage  # noqa: E402
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # noqa: E402
 
-VERSION = "3.7"
+VERSION = "3.8"
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHAT_ID = int(os.environ["CHAT_ID"])
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "123456789:AAFakeTestTokenForAltronBek35")
+CHAT_ID = int(os.environ.get("CHAT_ID", "777000"))
 COUNTRY = os.environ.get("COUNTRY", "Uzbekistan")
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Tashkent"))
 

@@ -20,7 +20,7 @@ HELP = (
     "Assalomu alaykum, Umarkhan!\n\n<b>AltronBek " + app.VERSION + "</b>\n"
     "Pastdagi tugmalar orqali ishlang. Tezkor qayd uchun xabarni <code>!</code> bilan boshlang.\n"
     "Buyruqlar:\n"
-    "/bugun /chelenjlar /moliya /bozorlik /narx /qoshish /royxat /vaqt /ball /sinf /qazolar /statistika /vazn /uyqu /yotdim "
+    "/bugun /chelenjlar /moliya /bozorlik /narx /maktab /qoshish /royxat /vaqt /ball /qazolar /statistika /vazn /uyqu /yotdim "
     "/uyqu_kiritish /obhavo /balandlik /hisob /tkunlar /tugilgan /izoh /izohlar /shahar /tiklash /sozlamalar /holat /bekor"
 )
 
@@ -30,11 +30,11 @@ def add_menu_kb() -> InlineKeyboardMarkup:
         return InlineKeyboardButton(text=t, callback_data=d)
     return InlineKeyboardMarkup(inline_keyboard=[
         [b("🛒 Bozorlik", "mk:home"), b("💰 Moliya", "add:fin")],
-        [b("🏆 Chelenj", "add:chl"), b("💊 Dorixona", "hl:home")],
-        [b("📝 Eslatma", "add:rem"), b("🎂 Tug'ilgan kun", "add:bday")],
-        [b("⚖️ Vazn", "add:weight"), b("📝 Izoh", "add:note")],
-        [b("➕ Bajardim", "ql:list"), b("😴 Yotdim / Uyqu", "sl:menu")],
-        [b("🎂 Ro'yxat", "bd:list"), b("📒 Izohlar", "nt:list")],
+        [b("🎓 Maktab", "ed:home"), b("💊 Dorixona", "hl:home")],
+        [b("🏆 Chelenj", "add:chl"), b("🎂 Tug'ilgan kun", "add:bday")],
+        [b("📝 Eslatma", "add:rem"), b("📝 Izoh", "add:note")],
+        [b("⚖️ Vazn", "add:weight"), b("😴 Yotdim / Uyqu", "sl:menu")],
+        [b("➕ Bajardim", "ql:list"), b("📒 Izohlar", "nt:list")],
     ])
 
 
@@ -134,3 +134,8 @@ async def btn_weather(message: Message, state: FSMContext):
 @router.message(F.text.in_({common.T_HEALTH, "💊 Salomatlik"}))
 async def btn_health(message: Message, state: FSMContext):
     await _optional_entry(message, state, "health", "Dorixona", "3.7")
+
+
+@router.message(F.text.in_({common.T_EDU, "🎓 Ta'lim", "🎓 Maktab"}))
+async def btn_education(message: Message, state: FSMContext):
+    await _optional_entry(message, state, "education", "Maktab / Ta'lim", "3.8")

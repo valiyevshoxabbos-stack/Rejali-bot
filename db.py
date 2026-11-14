@@ -491,7 +491,60 @@ CREATE TABLE IF NOT EXISTS system_error_logs (
 CREATE INDEX IF NOT EXISTS idx_sys_err_time ON system_error_logs(occurred_at);
 """
 
-MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7]
+MIGRATION_8 = """
+CREATE TABLE IF NOT EXISTS edu_courses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    class_name TEXT NOT NULL,
+    subject_name TEXT NOT NULL,
+    current_topic_order INTEGER DEFAULT 1,
+    is_active BOOLEAN DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(class_name, subject_name)
+);
+CREATE INDEX IF NOT EXISTS idx_edu_courses_active ON edu_courses(is_active);
+
+CREATE TABLE IF NOT EXISTS edu_topics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL REFERENCES edu_courses(id) ON DELETE CASCADE,
+    topic_order INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    homework TEXT,
+    topic_type TEXT NOT NULL DEFAULT 'regular',
+    is_completed BOOLEAN DEFAULT 0,
+    completed_at TIMESTAMP,
+    UNIQUE(course_id, topic_order)
+);
+CREATE INDEX IF NOT EXISTS idx_edu_topics_course ON edu_topics(course_id, topic_order);
+
+CREATE TABLE IF NOT EXISTS edu_timetable (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    weekday INTEGER NOT NULL,
+    period_number INTEGER NOT NULL,
+    course_id INTEGER REFERENCES edu_courses(id) ON DELETE SET NULL,
+    UNIQUE(weekday, period_number)
+);
+CREATE INDEX IF NOT EXISTS idx_edu_tt_day ON edu_timetable(weekday, period_number);
+
+CREATE TABLE IF NOT EXISTS edu_class_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL REFERENCES edu_courses(id) ON DELETE CASCADE,
+    note_text TEXT NOT NULL,
+    is_resolved BOOLEAN DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_edu_notes_course ON edu_class_notes(course_id, is_resolved);
+
+CREATE TABLE IF NOT EXISTS edu_calendar_off_days (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    off_type TEXT NOT NULL DEFAULT 'holiday'
+);
+CREATE INDEX IF NOT EXISTS idx_edu_off_dates ON edu_calendar_off_days(start_date, end_date);
+"""
+
+MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8]
 LAST_MIGRATED_FROM: int | None = None
 
 REQUIRED_TABLES = (
@@ -756,6 +809,7 @@ def init_db() -> list[str]:
     _handle_legacy(p)
     backups = migrate()
     ensure_health_items_columns()
+    seed_edu_data()
     return backups
 
 
@@ -818,6 +872,8 @@ def restore_from_file(src_path: str, stamp: str) -> str:
         os.remove(p)
     backup_to(src_path, p)
     migrate()
+    ensure_health_items_columns()
+    seed_edu_data()
     return safety_bak
 
 
@@ -988,4 +1044,37 @@ def seed_health_data():
                 f"UPDATE health_items SET remaining_quantity = 0.0 WHERE name IN ({','.join('?' for _ in seed_names)})",
                 tuple(seed_names),
             )
+
+
+# ------------------------------------------------------------------ 2026-2027 Ta'til va Bayram kunlari
+
+SEED_EDU_OFF_DAYS = [
+    # (title, start_date, end_date, off_type)
+    ("Kuzgi ta'til", "2026-11-04", "2026-11-09", "vacation"),
+    ("Qishki ta'til", "2026-12-28", "2027-01-10", "vacation"),
+    ("Bahorgi ta'til", "2027-03-21", "2027-03-27", "vacation"),
+    ("Yozgi ta'til", "2027-05-25", "2027-09-01", "vacation"),
+    ("Mustaqillik kuni", "2026-09-01", "2026-09-01", "holiday"),
+    ("O'qituvchi va murabbiylar kuni", "2026-10-01", "2026-10-01", "holiday"),
+    ("Konstitutsiya kuni", "2026-12-08", "2026-12-08", "holiday"),
+    ("Yangi yil", "2027-01-01", "2027-01-01", "holiday"),
+    ("Xotin-qizlar kuni", "2027-03-08", "2027-03-08", "holiday"),
+    ("Navro'z bayrami", "2027-03-21", "2027-03-21", "holiday"),
+    ("Xotira va qadrlash kuni", "2027-05-09", "2027-05-09", "holiday"),
+]
+
+
+def seed_edu_data():
+    """2026-2027 o'quv yili ta'tillar va bayramlar boshlang'ich ma'lumotlarini bazaga yuklaydi."""
+    tables = {r["name"] for r in q("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "edu_calendar_off_days" not in tables:
+        return
+    count = q1("SELECT COUNT(*) AS c FROM edu_calendar_off_days")["c"]
+    if count == 0:
+        for title, s_date, e_date, o_type in SEED_EDU_OFF_DAYS:
+            ex(
+                "INSERT INTO edu_calendar_off_days (title, start_date, end_date, off_type) VALUES (?, ?, ?, ?)",
+                (title, s_date, e_date, o_type),
+            )
+
 

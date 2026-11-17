@@ -15,7 +15,7 @@ import qazo as qz
 import services as sv
 
 PRAYERS = ("Bomdod", "Peshin", "Asr", "Shom", "Xufton")
-JOB_PREFIXES = ("rem_", "info_", "qazo_dl_", "edu_pre_", "edu_post_")
+JOB_PREFIXES = ("rem_", "info_", "qazo_dl_", "edu_pre_", "edu_post_", "uni_pre_", "uni_bag_", "uni_leave_")
 
 
 async def send_info(text: str):
@@ -81,6 +81,12 @@ async def schedule_today():
             await app.OPTIONAL["education"].schedule_today_lessons()
         except Exception as e:
             app.log.warning(f"Maktab darslarini rejalashtirishda xatolik: {e}")
+
+    if "uni" in app.OPTIONAL:
+        try:
+            await app.OPTIONAL["uni"].schedule_today_uni()
+        except Exception as e:
+            app.log.warning(f"Universitet darslarini rejalashtirishda xatolik: {e}")
     app.log.info(f"{today} uchun eslatmalar rejalashtirildi.")
 
 

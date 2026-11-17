@@ -16,16 +16,14 @@ _FIZIKA = {"slug": "fizika", "start": "07:20", "end": "08:40",
 _ZAL_AM = {"slug": "zal", "start": "09:00", "end": "11:00", "title": "Zal mashg'uloti",
            "priority": 2, "scored": True, "points": 10}
 _DUSH = {"slug": "dush", "start": "11:00", "title": "Dush, kiyinish", "priority": 1, "scored": False}
-_UNI = {"slug": "universitet", "start": "13:40", "title": "Universitet darslari boshlanadi",
-        "priority": 2, "scored": False}
 _BASSEYN = {"slug": "basseyn", "start": "19:00", "end": "21:00", "title": "Basseyn",
             "priority": 2, "scored": True, "points": 10}
 
 WEEKLY = {
-    0: [dict(_FIZIKA), dict(_ZAL_AM), dict(_DUSH), dict(_UNI)],                    # Dushanba
-    1: [dict(_FIZIKA), dict(_UNI), dict(_BASSEYN)],                                # Seshanba
-    2: [dict(_FIZIKA), dict(_ZAL_AM), dict(_DUSH), dict(_UNI)],                    # Chorshanba
-    3: [dict(_FIZIKA), dict(_UNI), dict(_BASSEYN)],                                # Payshanba
+    0: [dict(_FIZIKA), dict(_ZAL_AM), dict(_DUSH)],                                # Dushanba
+    1: [dict(_FIZIKA), dict(_BASSEYN)],                                            # Seshanba
+    2: [dict(_FIZIKA), dict(_ZAL_AM), dict(_DUSH)],                                # Chorshanba
+    3: [dict(_FIZIKA), dict(_BASSEYN)],                                            # Payshanba
     4: [  # Juma. Fizika 17:20-18:40 zal (18:00) bilan to'qnashgani uchun 15:30 ga surilgan.
         {"slug": "ish", "start": "07:00", "end": "14:45", "title": "Maktabda ish",
          "priority": 2, "scored": False},

@@ -68,6 +68,13 @@ def school_today_section(d: date) -> str:
     return "\n".join(lines)
 
 
+def uni_today_section(d: date) -> str:
+    if "uni" not in app.OPTIONAL:
+        return ""
+    txt = app.OPTIONAL["uni"].summary_today_section(d)
+    return f"\n{txt}" if txt else ""
+
+
 async def build_today_text() -> str:
     d = app.today()
     items = []
@@ -88,6 +95,9 @@ async def build_today_text() -> str:
     edu_text = school_today_section(d)
     if edu_text:
         lines.append(edu_text)
+    uni_text = uni_today_section(d)
+    if uni_text:
+        lines.append(uni_text)
     return "\n".join(lines)
 
 
@@ -100,9 +110,11 @@ def today_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="💰 Moliya", callback_data="fn:home"),
     ], [
         InlineKeyboardButton(text="🎓 Maktab", callback_data="ed:home"),
-        InlineKeyboardButton(text="💊 Dorixona", callback_data="hl:home"),
+        InlineKeyboardButton(text="🏛 Universitet", callback_data="uni:home"),
     ], [
+        InlineKeyboardButton(text="💊 Dorixona", callback_data="hl:home"),
         InlineKeyboardButton(text="😴 Yotdim / Uyqu", callback_data="sl:menu"),
+    ], [
         InlineKeyboardButton(text="⏸ Pauza", callback_data="pz:open"),
     ]])
 

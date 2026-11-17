@@ -544,7 +544,67 @@ CREATE TABLE IF NOT EXISTS edu_calendar_off_days (
 CREATE INDEX IF NOT EXISTS idx_edu_off_dates ON edu_calendar_off_days(start_date, end_date);
 """
 
-MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8]
+MIGRATION_9 = """
+CREATE TABLE IF NOT EXISTS uni_subjects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    teacher TEXT,
+    room TEXT,
+    is_active BOOLEAN DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_uni_subj_active ON uni_subjects(is_active);
+
+CREATE TABLE IF NOT EXISTS uni_timetable (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    weekday INTEGER NOT NULL,
+    para_number INTEGER NOT NULL,
+    subject_id INTEGER REFERENCES uni_subjects(id) ON DELETE CASCADE,
+    lesson_type TEXT NOT NULL DEFAULT 'lecture',
+    week_parity TEXT DEFAULT 'all',
+    custom_room TEXT,
+    UNIQUE(weekday, para_number, week_parity)
+);
+CREATE INDEX IF NOT EXISTS idx_uni_tt_day ON uni_timetable(weekday, para_number);
+
+CREATE TABLE IF NOT EXISTS uni_homeworks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id INTEGER NOT NULL REFERENCES uni_subjects(id) ON DELETE CASCADE,
+    target_lesson_type TEXT,
+    task_text TEXT NOT NULL,
+    due_date DATE,
+    is_done BOOLEAN DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_uni_hw_sub ON uni_homeworks(subject_id, is_done);
+
+CREATE TABLE IF NOT EXISTS uni_works (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    subject_name TEXT,
+    deadline DATE,
+    status TEXT DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_uni_works_status ON uni_works(status);
+
+CREATE TABLE IF NOT EXISTS uni_work_steps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_id INTEGER NOT NULL REFERENCES uni_works(id) ON DELETE CASCADE,
+    step_order INTEGER NOT NULL,
+    step_title TEXT NOT NULL,
+    is_done BOOLEAN DEFAULT 0,
+    completed_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_uni_steps_work ON uni_work_steps(work_id, step_order);
+
+CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY, slug TEXT);
+CREATE TABLE IF NOT EXISTS occurrences (id INTEGER PRIMARY KEY, reminder_id INTEGER, title TEXT);
+DELETE FROM reminders WHERE slug = 'universitet';
+DELETE FROM occurrences WHERE reminder_id IN (SELECT id FROM reminders WHERE slug = 'universitet') OR title LIKE '%Universitet darslari boshlanadi%';
+"""
+
+MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9]
 LAST_MIGRATED_FROM: int | None = None
 
 REQUIRED_TABLES = (

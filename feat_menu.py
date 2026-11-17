@@ -136,6 +136,39 @@ async def btn_health(message: Message, state: FSMContext):
     await _optional_entry(message, state, "health", "Dorixona", "3.7")
 
 
+def edu_hub_view() -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        "🎓 <b>Ta'lim va O'quv Markazi</b>\n\n"
+        "Kerakli bo'limni tanlang:\n"
+        "• <b>🏫 Maktab (O'qituvchi):</b> Sinflar, TMR rejalari, qo'ng'iroqlar jadvali, sinf izohlari\n"
+        "• <b>🏛 Universitet (Talaba):</b> Paralar jadvali, haftalar toqligi/juftligi, uy vazifalari, BMI va akademik ishlar"
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🏫 Maktab (O'qituvchi)", callback_data="ed:home")],
+            [InlineKeyboardButton(text="🏛 Universitet (Talaba)", callback_data="uni:home")],
+        ]
+    )
+    return text, kb
+
+
+@router.message(Command("talim"))
 @router.message(F.text.in_({common.T_EDU, "🎓 Ta'lim", "🎓 Maktab"}))
 async def btn_education(message: Message, state: FSMContext):
-    await _optional_entry(message, state, "education", "Maktab / Ta'lim", "3.8")
+    await cancel_flow(state)
+    txt, kb = edu_hub_view()
+    await messenger.send(txt, "info", kb)
+
+
+@router.callback_query(F.data == "edu:hub")
+async def cb_edu_hub(call: CallbackQuery, state: FSMContext):
+    await cancel_flow(state)
+    txt, kb = edu_hub_view()
+    await call.answer()
+    try:
+        await app.bot.edit_message_text(
+            txt, chat_id=app.CHAT_ID, message_id=call.message.message_id, reply_markup=messenger.with_delete(kb)
+        )
+    except Exception:
+        await messenger.send(txt, "info", kb)
+

@@ -24,7 +24,7 @@ CORE = [
     "menu", "reminders", "qazo", "sleep", "birthdays", "weight",
     "stats", "settings", "cleanup", "summary", "status", "restore",
 ]
-OPTIONAL = ["weather", "calculator", "challenges", "finance", "market", "health", "education"]
+OPTIONAL = ["weather", "calculator", "challenges", "finance", "market", "health", "education", "uni"]
 
 CHANGELOGS: dict[str, str] = {
     "3.6": (
@@ -58,12 +58,23 @@ CHANGELOGS: dict[str, str] = {
         "• ⏭ <b>Navbatdagi dars ko'rsatkichi:</b> Dars tugaganda 10 daqiqadan so'ng boshlanadigan keyingi dars haqida darhol bildirishnoma beriladi.\n"
         "• 📋 <b>Tezkor ko'rsatkich:</b> Maktab menyusiga «Bugungi / Ertagi darslar» tugmasi qo'shildi."
     ),
+    "3.8.5": (
+        "🚀 <b>AltronBek v3.8.5 yangilanishi muvaffaqiyatli o'rnatildi!</b>\n"
+        "• 🏛 <b>Universitet va Akademik Ishlar:</b> Talabalar uchun paralar, toq/juft haftalar va auditoriyalar boshqaruvi.\n"
+        "• 🎒 <b>Aqlli Eslatmalar:</b> 12:45 da sumka yig'ish, 13:15 da uydan chiqish va darsdan 10 daqiqa oldin xabarnoma.\n"
+        "• 📝 <b>Uy Vazifalari:</b> Dars turiga (ma'ruza, seminar, lab) moslashgan vazifalar va «Keyingi darsgacha» avto-muddati.\n"
+        "• 🎓 <b>BMI va Akademik Ishlar:</b> 7 bosqichli BMI, Kurs ishi, Mustaqil ish shablonlari va progress bar.\n"
+        "• 🏆 <b>Chelenj Integratsiyasi:</b> BMI bosqichi yopilganda faol chelenjdagi BMI vazifasi avtomatik bajariladi.\n"
+        "• 🧹 <b>Eski statik universitet eslatmalari to'liq olib tashlandi.</b>"
+    ),
 }
 
 COMMANDS = [
     ("bugun", "Bugungi reja"),
+    ("talim", "Ta'lim markazi (maktab va universitet)"),
+    ("universitet", "Universitet moduli (paralar, uy ishlari, BMI)"),
+    ("uni", "Universitet moduli"),
     ("maktab", "Maktab ta'lim moduli (darslar, TMR, jadval)"),
-    ("talim", "Maktab ta'lim moduli"),
     ("chelenjlar", "Chelenjlar paneli"),
     ("moliya", "Moliya boshqaruvi"),
     ("bozorlik", "Smart Bozorlik va savat"),

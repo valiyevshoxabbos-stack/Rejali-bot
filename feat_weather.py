@@ -29,7 +29,7 @@ def _kb(day_key: str = "tod") -> InlineKeyboardMarkup:
     ]])
 
 
-def render_weather(info: dict, loc: dict, header: str, compact: bool = False) -> str:
+def render_weather(info: dict, loc: dict, header: str, compact: bool = False, cached_fallback: bool = False, cached_at: str = "") -> str:
     elev = loc.get("elevation") if loc.get("elevation") is not None else info.get("elevation")
     elev_s = f", {round(elev)} m" if elev is not None else ""
     lines = [f"{header} — <b>{app.esc(loc['city'])}{elev_s}</b>"]
@@ -60,13 +60,18 @@ def render_weather(info: dict, loc: dict, header: str, compact: bool = False) ->
     elif not compact:
         lines.append(f"☀️ Yog'in ehtimoli past ({info['max_precip']}%)")
 
+    if cached_fallback or info.get("cached_fallback"):
+        c_at = cached_at or info.get("cached_at", "")
+        c_str = f" ({c_at} holatiga)" if c_at else ""
+        lines.append(f"\n⚠️ <i>Keshlangan ma'lumot{c_str}</i>")
+
     lines.append("<i>Manba: Open-Meteo.com</i>")
     return "\n".join(lines)
 
 
-async def _fetch_async(force: bool = False) -> dict | None:
+async def _fetch_async(force: bool = False, on_progress=None) -> dict | None:
     try:
-        return await asyncio.to_thread(sv.get_weather_data, force)
+        return await asyncio.to_thread(sv.get_weather_data, force, on_progress)
     except Exception as e:
         app.log.warning(f"Ob-havo ma'lumotini olishda xatolik: {e}")
         return None
@@ -80,7 +85,9 @@ async def morning_weather_section() -> str:
     info = sv.analyze_weather_for_date(bundle["raw"], app.today())
     if not info:
         return ""
-    return "\n\n" + render_weather(info, bundle["loc"], "🌦 <b>Bugungi ob-havo</b>", compact=True)
+    is_cached = bundle.get("cached_fallback", False)
+    c_at = bundle.get("cached_at", "")
+    return "\n\n" + render_weather(info, bundle["loc"], "🌦 <b>Bugungi ob-havo</b>", compact=True, cached_fallback=is_cached, cached_at=c_at)
 
 
 async def evening_tomorrow_section() -> str:
@@ -92,25 +99,58 @@ async def evening_tomorrow_section() -> str:
     info = sv.analyze_weather_for_date(bundle["raw"], tom)
     if not info:
         return ""
-    return "\n\n" + render_weather(info, bundle["loc"], "🌦 <b>Ertaga ob-havo</b>", compact=True)
+    is_cached = bundle.get("cached_fallback", False)
+    c_at = bundle.get("cached_at", "")
+    return "\n\n" + render_weather(info, bundle["loc"], "🌦 <b>Ertaga ob-havo</b>", compact=True, cached_fallback=is_cached, cached_at=c_at)
 
 
-async def _build_screen(day_key: str = "tod", force: bool = False) -> tuple[str, InlineKeyboardMarkup | None]:
-    bundle = await _fetch_async(force=force)
+async def _build_screen(
+    day_key: str = "tod",
+    force: bool = False,
+    existing_msg=None,
+    user_msg=None,
+) -> tuple[str, InlineKeyboardMarkup | None, Message | None]:
+    anim_msg = existing_msg
+
+    async def on_progress(attempt: int, total: int, wait_sec: int):
+        nonlocal anim_msg
+        bar = sv.PROGRESS_BARS.get(attempt, "[▓▓░░░]")
+        prog_text = f"⏳ Server bilan bog'lanilmoqda...\n{bar} {attempt}/{total}-urinish ({wait_sec} soniya kutilmoqda...)"
+        try:
+            if anim_msg is not None:
+                await app.bot.edit_message_text(
+                    prog_text, chat_id=app.CHAT_ID, message_id=anim_msg.message_id
+                )
+            elif user_msg is not None:
+                anim_msg = await messenger.send(prog_text, "info", bind_trigger=False)
+        except Exception:
+            pass
+
+    bundle = await _fetch_async(force=force, on_progress=on_progress)
     if not bundle:
-        return "⚠️ Ob-havo xizmati vaqtincha javob bermayapti. Birozdan so'ng qayta urinib ko'ring.", None
+        return "⚠️ Ob-havo xizmati vaqtincha javob bermayapti. Birozdan so'ng qayta urinib ko'ring.", None, anim_msg
     target: date = app.today() if day_key == "tod" else app.today() + timedelta(days=1)
     title = "🌦 <b>Bugungi ob-havo</b>" if day_key == "tod" else "🌦 <b>Ertangi ob-havo</b>"
     info = sv.analyze_weather_for_date(bundle["raw"], target)
     if not info:
-        return "⚠️ Tanlangan kun uchun ob-havo ma'lumoti topilmadi.", None
-    text = render_weather(info, bundle["loc"], title, compact=False)
-    return text, _kb(day_key)
+        return "⚠️ Tanlangan kun uchun ob-havo ma'lumoti topilmadi.", None, anim_msg
+    is_cached = bundle.get("cached_fallback", False)
+    c_at = bundle.get("cached_at", "")
+    text = render_weather(info, bundle["loc"], title, compact=False, cached_fallback=is_cached, cached_at=c_at)
+    return text, _kb(day_key), anim_msg
 
 
 async def entry(message: Message):
     """Doimiy menyudagi '🌦 Ob-havo' tugmasi kirish nuqtasi (keshdan oladi)."""
-    text, kb = await _build_screen("tod", force=False)
+    text, kb, anim_msg = await _build_screen("tod", force=False, user_msg=message)
+    if anim_msg is not None:
+        try:
+            await app.bot.edit_message_text(
+                text, chat_id=app.CHAT_ID, message_id=anim_msg.message_id, reply_markup=messenger.with_delete(kb)
+            )
+            return
+        except Exception:
+            pass
     await messenger.send(text, "info", kb)
 
 
@@ -141,7 +181,7 @@ async def cmd_elevation(message: Message):
 async def cb_switch_day(cb: CallbackQuery):
     day_key = cb.data.split(":")[1]
     await cb.answer()
-    text, kb = await _build_screen(day_key, force=False)
+    text, kb, anim_msg = await _build_screen(day_key, force=False, existing_msg=cb.message)
     await cb.message.edit_text(text, reply_markup=messenger.with_delete(kb))
 
 
@@ -149,5 +189,5 @@ async def cb_switch_day(cb: CallbackQuery):
 async def cb_refresh(cb: CallbackQuery):
     day_key = cb.data.split(":")[2]
     await cb.answer("Yangilandi")
-    text, kb = await _build_screen(day_key, force=True)
+    text, kb, anim_msg = await _build_screen(day_key, force=True, existing_msg=cb.message)
     await cb.message.edit_text(text, reply_markup=messenger.with_delete(kb))

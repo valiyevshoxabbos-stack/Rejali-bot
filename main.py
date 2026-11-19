@@ -67,6 +67,13 @@ CHANGELOGS: dict[str, str] = {
         "• 🏆 <b>Chelenj Integratsiyasi:</b> BMI bosqichi yopilganda faol chelenjdagi BMI vazifasi avtomatik bajariladi.\n"
         "• 🧹 <b>Eski statik universitet eslatmalari to'liq olib tashlandi.</b>"
     ),
+    "3.9": (
+        "🚀 <b>AltronBek v3.9 yangilanishi muvaffaqiyatli o'rnatildi!</b>\n"
+        "• 🌐 <b>API Barqarorligi va Kesh:</b> Namoz va ob-havo uchun 5 bosqichli retry (5/10/15/30/90s), jonli progress bar va avto-kesh.\n"
+        "• 🛡 <b>Scheduler Izolyatsiyasi & Self-Healing:</b> Eslatmalar mustaqil bloklarda ishlaydi, yo'qolgan eslatmalar avtomatik tiklanadi.\n"
+        "• 🛠 <b>Kengaytirilgan Diagnostika (/diagnostika):</b> Uptime, DB hajmi, scheduler holati, xatolar jurnali va zaxira nusxa.\n"
+        "• 💊 <b>Dorixona & Davolanish Kursi:</b> Ko'p dorili kurslar, aptechka bilan avto-sinxronizatsiya, yangi kategoriyalar va tahrirlash paneli."
+    ),
 }
 
 COMMANDS = [

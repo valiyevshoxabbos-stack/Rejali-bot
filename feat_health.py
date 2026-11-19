@@ -28,6 +28,12 @@ import db
 import messenger
 import services as sv
 
+
+def render_diagnostics() -> str:
+    import feat_settings
+    res = feat_settings.render_diagnostics()
+    return res[0] if isinstance(res, tuple) else res
+
 router = Router()
 
 HEALTH_FOOTER = "\n\n🚑 Unutmang: agar o'zingizni yomon his etsangiz, darhol 103 tez yordamga qo'ng'iroq qiling!"
@@ -57,6 +63,21 @@ class HealthFSM(StatesGroup):
     course_med_times = State()
     course_med_dose = State()
     course_med_food = State()
+    course_med_qty = State()
+    course_med_price = State()
+    course_pay_account = State()
+
+    # Custom category
+    cat_new_name = State()
+    cat_new_icon = State()
+
+    # Item full edit
+    edit_item_name = State()
+    edit_item_cats = State()
+    edit_item_form = State()
+    edit_item_qty = State()
+    edit_item_loc = State()
+    edit_item_notes = State()
 
     # Triage selection
     triage_select = State()
@@ -74,6 +95,25 @@ def fmt_sum(n: int | float) -> str:
 
 def fmt_qty(q: float) -> str:
     return str(int(q)) if float(q).is_integer() else f"{float(q):g}"
+
+
+def default_unit_for_form(form: str) -> str:
+    f = (form or "").lower().strip()
+    if f in ("maz", "gel", "krem", "balzam"):
+        return "tyubik"
+    elif f in ("sirop", "sprey", "tomchi"):
+        return "flakon"
+    elif f in ("kapsula",):
+        return "kapsula"
+    elif f in ("tabletka",):
+        return "tabletka"
+    return "dona"
+
+
+def is_tube_form(form: str, unit: str = "") -> bool:
+    f = (form or "").lower().strip()
+    u = (unit or "").lower().strip()
+    return u == "tyubik" or f in ("maz", "gel", "krem", "balzam")
 
 
 def with_footer(text: str) -> str:
@@ -127,12 +167,12 @@ def main_health_view() -> tuple[str, InlineKeyboardMarkup]:
     if low_stock > 0:
         lines.append(f"⚠️ <b>Tugab borayotgan vositalar:</b> {low_stock} ta")
     lines.append("\nQuyidagi bo'limlardan birini tanlang:")
-    return "\n".join(lines), main_health_kb()
+    return with_footer("\n".join(lines)), main_health_kb()
 
 
 async def entry(message: Message):
     text, kb = main_health_view()
-    await messenger.send(with_footer(text), "info", kb)
+    await messenger.send(text, "info", kb)
 
 
 @router.message(Command("salomatlik"))
@@ -209,7 +249,7 @@ def pharmacy_view(loc: str = "home", page: int = 0) -> tuple[str, InlineKeyboard
         kb_rows.append(nav_row)
 
     kb_rows.append([btn("➕ Yangi dori qo'shish", "hl:add_it"), btn("⬅️ Asosiy menyu", "hl:home")])
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows)
+    return with_footer("\n".join(lines)), InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
 @router.callback_query(F.data.startswith("hl:ap:"))
@@ -267,11 +307,19 @@ def item_detail_view(item_id: int) -> tuple[str, InlineKeyboardMarkup]:
             dt_s = last_log["taken_at"][:16]
         lines.append(f"🕒 <b>Oxirgi qabul:</b> {dt_s}")
 
-    kb_rows = [
-        [btn("💊 Ichdim (-1)", f"hl:drk:{item_id}")],
-    ]
+    is_tube = is_tube_form(item.get("form"), item.get("unit"))
+    if is_tube:
+        kb_rows = [
+            [btn("🧴 Surtdim / Ishlatdim", f"hl:drk:{item_id}")],
+            [btn("🏁 Tugadi (0 qilish)", f"hl:it_empty:{item_id}")],
+        ]
+    else:
+        kb_rows = [
+            [btn("💊 Ichdim (-1)", f"hl:drk:{item_id}")],
+        ]
     if float(item["remaining_quantity"]) <= float(item["low_stock_threshold"]):
         kb_rows.append([btn("🛒 Bozorlikka qo'shish", f"hl:low_mkt:{item_id}")])
+    kb_rows.append([btn("✏️ Tahrirlash", f"hl:edit:{item_id}")])
     kb_rows.append([
         btn("🗑 O'chirish", f"hl:del_it:{item_id}"),
         btn("⬅️ Orqaga", f"hl:ap:{item['location']}:0"),
@@ -336,6 +384,14 @@ def execute_intake(item_id: int, quantity: float = 1.0) -> dict:
         return {"ok": False, "error": "Vosita topilmadi."}
 
     cur_q = float(item["remaining_quantity"])
+    if is_tube_form(item.get("form"), item.get("unit")):
+        db.ins(
+            "INSERT INTO health_intake_logs (item_id, quantity, status, taken_at) VALUES (?, 0, 'applied', ?)",
+            (item_id, app.now().isoformat()),
+        )
+        low = cur_q <= float(item["low_stock_threshold"])
+        return {"ok": True, "new_quantity": cur_q, "item": item, "low_stock": low, "applied": True}
+
     new_q = max(0.0, cur_q - quantity)
     db.ex("UPDATE health_items SET remaining_quantity = ? WHERE id = ?", (new_q, item_id))
     db.ins(
@@ -345,6 +401,15 @@ def execute_intake(item_id: int, quantity: float = 1.0) -> dict:
 
     low = new_q <= float(item["low_stock_threshold"])
     return {"ok": True, "new_quantity": new_q, "item": item, "low_stock": low}
+
+
+@router.callback_query(F.data.startswith("hl:it_empty:"))
+async def cb_item_empty(cb: CallbackQuery):
+    item_id = int(cb.data.split(":")[2])
+    db.ex("UPDATE health_items SET remaining_quantity = 0.0 WHERE id = ?", (item_id,))
+    await cb.answer("Vosita qoldig'i 0 ga tushirildi (tugadi).")
+    text, kb = item_detail_view(item_id)
+    await _edit_or_send(cb.message, text, kb)
 
 
 @router.callback_query(F.data.startswith("hl:drk:"))
@@ -388,10 +453,16 @@ async def cb_drink_force(cb: CallbackQuery):
 async def _show_intake_result(target_msg, item_id: int, res: dict):
     item = res["item"]
     new_q = res["new_quantity"]
-    lines = [
-        f"✅ <b>{app.esc(item['name'])}</b> qabul qilindi.\n",
-        f"📦 Qoldiq: <b>{fmt_qty(new_q)} {app.esc(item['unit'])}</b>",
-    ]
+    if res.get("applied"):
+        lines = [
+            f"✅ <b>{app.esc(item['name'])}</b> surtildi / ishlatildi.\n",
+            f"📦 Qoldiq: <b>{fmt_qty(new_q)} {app.esc(item['unit'])}</b> (tyubik)",
+        ]
+    else:
+        lines = [
+            f"✅ <b>{app.esc(item['name'])}</b> qabul qilindi.\n",
+            f"📦 Qoldiq: <b>{fmt_qty(new_q)} {app.esc(item['unit'])}</b>",
+        ]
 
     kb_rows = []
     if res["low_stock"]:
@@ -458,6 +529,232 @@ async def cb_delete_item(cb: CallbackQuery):
     await _edit_or_send(cb.message, text, kb)
 
 
+# --- Vosita ma'lumotlarini tahrirlash (Edit Item) ---
+
+def item_edit_view(item_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    item = db.q1("SELECT * FROM health_items WHERE id = ?", (item_id,))
+    if not item:
+        return "⚠️ Vosita topilmadi.", InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Aptechka", "hl:ap:home:0")]])
+    loc_s = "🏠 Uyda" if item["location"] == "home" else "🎒 Sumkada"
+    lines = [
+        f"✏️ <b>Vosita ma'lumotlarini tahrirlash:</b> {app.esc(item['name'])}\n",
+        f"• Shakli: <b>{app.esc(item['form'])}</b> ({app.esc(item['unit'])})",
+        f"• Qoldiq: <b>{fmt_qty(item['remaining_quantity'])} {app.esc(item['unit'])}</b>",
+        f"• Joylashuvi: <b>{loc_s}</b>",
+    ]
+    if item.get("notes"):
+        lines.append(f"• Izoh: <i>{app.esc(item['notes'])}</i>")
+    lines.append("\nQaysi ma'lumotni o'zgartirmoqchisiz?")
+
+    kb_rows = [
+        [btn("🏷 Nomini o'zgartirish", f"hl:ed_name:{item_id}")],
+        [btn("📂 Kategoriyalarni tahrirlash", f"hl:ed_cats:{item_id}")],
+        [btn("💊 Shakli va birligini tanlash", f"hl:ed_form:{item_id}")],
+        [btn("📦 Qoldiq miqdorini kiritish", f"hl:ed_qty:{item_id}")],
+        [btn("📍 Saqlash joyi (Uy / Sumka)", f"hl:ed_loc:{item_id}")],
+        [btn("📝 Izoh / Allergiya kiritish", f"hl:ed_notes:{item_id}")],
+        [btn("🗑 Vositani o'chirish", f"hl:del_it:{item_id}")],
+        [btn("⬅️ Kartochkaga qaytish", f"hl:it:{item_id}")],
+    ]
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+@router.callback_query(F.data.startswith("hl:edit:"))
+async def cb_item_edit(cb: CallbackQuery, state: FSMContext):
+    item_id = int(cb.data.split(":")[2])
+    await cb.answer()
+    await state.clear()
+    text, kb = item_edit_view(item_id)
+    await _edit_or_send(cb.message, text, kb)
+
+
+@router.callback_query(F.data.startswith("hl:ed_name:"))
+async def cb_ed_name(cb: CallbackQuery, state: FSMContext):
+    item_id = int(cb.data.split(":")[2])
+    await cb.answer()
+    await state.set_state(HealthFSM.edit_item_name)
+    await state.update_data(edit_item_id=item_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("❌ Bekor qilish", f"hl:edit:{item_id}")]])
+    await _edit_or_send(cb.message, "Yangi vosita nomini kiriting:", kb)
+
+
+@router.message(HealthFSM.edit_item_name)
+async def process_ed_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    if len(name) < 2:
+        await messenger.send("⚠️ Nom kamida 2 belgidan iborat bo'lsin.", "info")
+        return
+    data = await state.get_data()
+    item_id = data["edit_item_id"]
+    db.ex("UPDATE health_items SET name = ? WHERE id = ?", (name, item_id))
+    await state.clear()
+    await messenger.send(
+        with_footer(f"✅ Vosita nomi <b>{app.esc(name)}</b> ga o'zgartirildi!"),
+        "info",
+        InlineKeyboardMarkup(inline_keyboard=[[btn("📋 Kartochka", f"hl:it:{item_id}")]])
+    )
+
+
+@router.callback_query(F.data.startswith("hl:ed_cats:"))
+async def cb_ed_cats(cb: CallbackQuery, state: FSMContext):
+    item_id = int(cb.data.split(":")[2])
+    await cb.answer()
+    current_cats = {r["category_id"] for r in db.q("SELECT category_id FROM health_item_categories WHERE item_id = ?", (item_id,))}
+    await state.set_state(HealthFSM.edit_item_cats)
+    await state.update_data(edit_item_id=item_id, selected_cats=sorted(list(current_cats)))
+    kb = category_multiselect_kb(current_cats, edit_item_id=item_id)
+    item = db.q1("SELECT name FROM health_items WHERE id = ?", (item_id,))
+    await _edit_or_send(cb.message, f"<b>{app.esc(item['name'])}</b> uchun toifalarni tanlang:", kb)
+
+
+@router.callback_query(HealthFSM.edit_item_cats, F.data.startswith("hl:ed_togcat:"))
+async def cb_ed_toggle_cat(cb: CallbackQuery, state: FSMContext):
+    parts = cb.data.split(":")
+    cid = int(parts[2])
+    item_id = int(parts[3])
+    data = await state.get_data()
+    selected = set(data.get("selected_cats") or [])
+    if cid in selected:
+        selected.remove(cid)
+    else:
+        selected.add(cid)
+    await state.update_data(selected_cats=sorted(list(selected)))
+    await cb.answer()
+    kb = category_multiselect_kb(selected, edit_item_id=item_id)
+    item = db.q1("SELECT name FROM health_items WHERE id = ?", (item_id,))
+    await _edit_or_send(cb.message, f"<b>{app.esc(item['name'])}</b> uchun toifalarni tanlang:", kb)
+
+
+@router.callback_query(HealthFSM.edit_item_cats, F.data.startswith("hl:ed_cat_done:"))
+async def cb_ed_cat_done(cb: CallbackQuery, state: FSMContext):
+    item_id = int(cb.data.split(":")[2])
+    data = await state.get_data()
+    selected = set(data.get("selected_cats") or [])
+    if not selected:
+        await cb.answer("Kamida 1 ta kategoriya tanlang!", show_alert=True)
+        return
+    await cb.answer("Kategoriyalar saqlandi!")
+    db.ex("DELETE FROM health_item_categories WHERE item_id = ?", (item_id,))
+    for cid in selected:
+        db.ex("INSERT INTO health_item_categories (item_id, category_id) VALUES (?, ?)", (item_id, cid))
+    primary = sorted(list(selected))[0]
+    db.ex("UPDATE health_items SET category_id = ? WHERE id = ?", (primary, item_id))
+    await state.clear()
+    text, kb = item_detail_view(item_id)
+    await _edit_or_send(cb.message, text, kb)
+
+
+@router.callback_query(F.data.startswith("hl:ed_form:"))
+async def cb_ed_form(cb: CallbackQuery, state: FSMContext):
+    item_id = int(cb.data.split(":")[2])
+    await cb.answer()
+    await state.set_state(HealthFSM.edit_item_form)
+    await state.update_data(edit_item_id=item_id)
+    forms = [
+        ("Tabletka", "tabletka"), ("Kapsula", "kapsula"),
+        ("Sirop (flakon)", "sirop"), ("Maz / Krem (tyubik)", "maz"),
+        ("Sprey (flakon)", "sprey"), ("Tomchi (flakon)", "tomchi"),
+        ("Boshqa", "boshqa"),
+    ]
+    rows = []
+    for i in range(0, len(forms), 2):
+        row = [btn(forms[i][0], f"hl:set_ed_form:{forms[i][1]}:{item_id}")]
+        if i + 1 < len(forms):
+            row.append(btn(forms[i + 1][0], f"hl:set_ed_form:{forms[i + 1][1]}:{item_id}"))
+        rows.append(row)
+    rows.append([btn("❌ Bekor qilish", f"hl:edit:{item_id}")])
+    await _edit_or_send(cb.message, "Yangi shakl va birlikni tanlang:", InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(F.data.startswith("hl:set_ed_form:"))
+async def cb_set_ed_form(cb: CallbackQuery, state: FSMContext):
+    parts = cb.data.split(":")
+    form = parts[2]
+    item_id = int(parts[3])
+    unit = default_unit_for_form(form)
+    db.ex("UPDATE health_items SET form = ?, unit = ? WHERE id = ?", (form, unit, item_id))
+    await cb.answer("Shakl va birlik yangilandi!")
+    await state.clear()
+    text, kb = item_detail_view(item_id)
+    await _edit_or_send(cb.message, text, kb)
+
+
+@router.callback_query(F.data.startswith("hl:ed_qty:"))
+async def cb_ed_qty(cb: CallbackQuery, state: FSMContext):
+    item_id = int(cb.data.split(":")[2])
+    await cb.answer()
+    await state.set_state(HealthFSM.edit_item_qty)
+    await state.update_data(edit_item_id=item_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("❌ Bekor qilish", f"hl:edit:{item_id}")]])
+    await _edit_or_send(cb.message, "Yangi qoldiq miqdorini kiriting (masalan: <code>15</code> yoki <code>1</code>):", kb)
+
+
+@router.message(HealthFSM.edit_item_qty)
+async def process_ed_qty(message: Message, state: FSMContext):
+    try:
+        qty = float((message.text or "").strip().replace(",", "."))
+        if qty < 0:
+            raise ValueError
+    except ValueError:
+        await messenger.send("⚠️ Iltimos, musbat son kiriting (masalan: 10):", "info")
+        return
+    data = await state.get_data()
+    item_id = data["edit_item_id"]
+    db.ex("UPDATE health_items SET remaining_quantity = ? WHERE id = ?", (qty, item_id))
+    await state.clear()
+    await messenger.send(
+        with_footer(f"✅ Qoldiq miqdori <b>{fmt_qty(qty)}</b> ga yangilandi!"),
+        "info",
+        InlineKeyboardMarkup(inline_keyboard=[[btn("📋 Kartochka", f"hl:it:{item_id}")]])
+    )
+
+
+@router.callback_query(F.data.startswith("hl:ed_loc:"))
+async def cb_ed_loc(cb: CallbackQuery, state: FSMContext):
+    item_id = int(cb.data.split(":")[2])
+    await cb.answer()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn("🏠 Uyda (Aptechka)", f"hl:set_ed_loc:home:{item_id}"), btn("🎒 Sumkada", f"hl:set_ed_loc:bag:{item_id}")],
+        [btn("❌ Bekor qilish", f"hl:edit:{item_id}")],
+    ])
+    await _edit_or_send(cb.message, "Saqlash joyini tanlang:", kb)
+
+
+@router.callback_query(F.data.startswith("hl:set_ed_loc:"))
+async def cb_set_ed_loc(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    loc = parts[2]
+    item_id = int(parts[3])
+    db.ex("UPDATE health_items SET location = ? WHERE id = ?", (loc, item_id))
+    await cb.answer("Saqlash joyi o'zgartirildi!")
+    text, kb = item_detail_view(item_id)
+    await _edit_or_send(cb.message, text, kb)
+
+
+@router.callback_query(F.data.startswith("hl:ed_notes:"))
+async def cb_ed_notes(cb: CallbackQuery, state: FSMContext):
+    item_id = int(cb.data.split(":")[2])
+    await cb.answer()
+    await state.set_state(HealthFSM.edit_item_notes)
+    await state.update_data(edit_item_id=item_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("❌ Bekor qilish", f"hl:edit:{item_id}")]])
+    await _edit_or_send(cb.message, "Izoh yoki allergiya ma'lumotlarini kiriting (masalan: <i>och qoringa ichilmasin, allergiyam bor</i>):", kb)
+
+
+@router.message(HealthFSM.edit_item_notes)
+async def process_ed_notes(message: Message, state: FSMContext):
+    notes = (message.text or "").strip()
+    data = await state.get_data()
+    item_id = data["edit_item_id"]
+    db.ex("UPDATE health_items SET notes = ? WHERE id = ?", (notes, item_id))
+    await state.clear()
+    await messenger.send(
+        with_footer("✅ Izoh va allergiya ma'lumoti saqlandi!"),
+        "info",
+        InlineKeyboardMarkup(inline_keyboard=[[btn("📋 Kartochka", f"hl:it:{item_id}")]])
+    )
+
+
 # --- Dori qo'shish FSM (Uyda bor zaxira vs Yangi sotib oldim) ---
 
 @router.callback_query(F.data == "hl:add_it")
@@ -470,7 +767,7 @@ async def cb_start_add_item(cb: CallbackQuery, state: FSMContext):
     await _edit_or_send(cb.message, "➕ <b>Yangi dori/vosita qo'shish</b>\n\nVosita nomini kiriting (masalan: <code>Tsitramon</code>):", kb)
 
 
-def category_multiselect_kb(selected_ids: set[int]) -> InlineKeyboardMarkup:
+def category_multiselect_kb(selected_ids: set[int], edit_item_id: int | None = None) -> InlineKeyboardMarkup:
     cats = db.q("SELECT id, name, icon FROM health_categories ORDER BY sort_order, id")
     rows = []
     for c in cats:
@@ -478,11 +775,61 @@ def category_multiselect_kb(selected_ids: set[int]) -> InlineKeyboardMarkup:
         checked = "✅" if cid in selected_ids else "⬜"
         icon = c.get("icon") or "💊"
         title = f"{checked} {icon} {c['name']}"
-        rows.append([btn(title, f"hl:togcat:{cid}")])
+        cb_str = f"hl:ed_togcat:{cid}:{edit_item_id}" if edit_item_id else f"hl:togcat:{cid}"
+        rows.append([btn(title, cb_str)])
+    add_cat_cb = f"hl:cat_add_new:{edit_item_id}" if edit_item_id else "hl:cat_add_new"
+    rows.append([btn("➕ Yangi kategoriya qo'shish", add_cat_cb)])
     cnt = len(selected_ids)
-    rows.append([btn(f"➡️ Davom etish (Tanlandi: {cnt} ta)", "hl:cat_done")])
-    rows.append([btn("❌ Bekor qilish", "hl:home")])
+    done_cb = f"hl:ed_cat_done:{edit_item_id}" if edit_item_id else "hl:cat_done"
+    cancel_cb = f"hl:edit:{edit_item_id}" if edit_item_id else "hl:home"
+    rows.append([btn(f"➡️ Davom etish (Tanlandi: {cnt} ta)", done_cb)])
+    rows.append([btn("❌ Bekor qilish", cancel_cb)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("hl:cat_add_new"))
+async def cb_cat_add_new(cb: CallbackQuery, state: FSMContext):
+    parts = cb.data.split(":")
+    edit_item_id = int(parts[2]) if len(parts) > 2 else None
+    await cb.answer()
+    await state.set_state(HealthFSM.cat_new_name)
+    await state.update_data(cat_for_edit_id=edit_item_id)
+    cancel_cb = f"hl:ed_cats:{edit_item_id}" if edit_item_id else "hl:home"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("❌ Bekor qilish", cancel_cb)]])
+    await _edit_or_send(cb.message, "➕ <b>Yangi kategoriya qo'shish</b>\n\nKategoriya nomini kiriting (masalan: <i>Vitaminlar</i>):", kb)
+
+
+@router.message(HealthFSM.cat_new_name)
+async def process_cat_new_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    if len(name) < 2:
+        await messenger.send("⚠️ Nom kamida 2 belgidan iborat bo'lsin.", "info")
+        return
+    await state.update_data(new_cat_name=name)
+    await state.set_state(HealthFSM.cat_new_icon)
+    await messenger.send(with_footer(f"<b>{app.esc(name)}</b> uchun emoji/belgi kiriting (masalan: 🧪 yoki 🍎):"), "info")
+
+
+@router.message(HealthFSM.cat_new_icon)
+async def process_cat_new_icon(message: Message, state: FSMContext):
+    icon = (message.text or "💊").strip()[:4]
+    data = await state.get_data()
+    name = data["new_cat_name"]
+    cid = db.add_custom_health_category(name, icon)
+    selected = set(data.get("selected_cats") or [])
+    selected.add(cid)
+    edit_item_id = data.get("cat_for_edit_id")
+    await state.update_data(selected_cats=sorted(list(selected)))
+    if edit_item_id:
+        await state.set_state(HealthFSM.edit_item_cats)
+        kb = category_multiselect_kb(selected, edit_item_id=edit_item_id)
+        item = db.q1("SELECT name FROM health_items WHERE id = ?", (edit_item_id,))
+        await messenger.send(with_footer(f"✅ Yangi kategoriya <b>{icon} {app.esc(name)}</b> qo'shildi va tanlandi!\n\nToifalarni tanlashda davom eting:"), "info", kb)
+    else:
+        await state.set_state(HealthFSM.item_cat)
+        kb = category_multiselect_kb(selected)
+        item_name = data.get("item_name", "Dori")
+        await messenger.send(with_footer(f"✅ Yangi kategoriya <b>{icon} {app.esc(name)}</b> qo'shildi va tanlandi!\n\n<b>{app.esc(item_name)}</b> uchun toifalarni tanlang:"), "info", kb)
 
 
 @router.message(HealthFSM.item_name)
@@ -574,7 +921,7 @@ async def cb_choose_loc(cb: CallbackQuery, state: FSMContext):
 async def cb_choose_form(cb: CallbackQuery, state: FSMContext):
     form = cb.data.split(":")[2]
     await cb.answer()
-    await state.update_data(item_form=form)
+    await state.update_data(item_form=form, item_unit=default_unit_for_form(form))
     await state.set_state(HealthFSM.item_dosage)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [btn("O'tkazib yuborish (1 dona)", "hl:skip_dose")],
@@ -691,7 +1038,7 @@ async def _save_health_item(data: dict, price: float = 0, account_id: int | None
     form = data.get("item_form", "tabletka")
     dosage = data.get("item_dosage", "1 dona")
     qty = float(data.get("item_qty", 10.0))
-    unit = "dona"
+    unit = data.get("item_unit") or default_unit_for_form(form)
 
     item_id = db.ins(
         "INSERT INTO health_items (name, kind, category_id, location, form, default_dosage, remaining_quantity, unit, low_stock_threshold, is_seed) "
@@ -748,7 +1095,7 @@ def courses_view() -> tuple[str, InlineKeyboardMarkup]:
         [btn("➕ Yangi kurs qo'shish", "hl:add_cr")],
         [btn("⬅️ Salomatlik markazi", "hl:home")],
     ]
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb_rows)
+    return with_footer("\n".join(lines)), InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
 @router.callback_query(F.data == "hl:cr:home")
@@ -771,7 +1118,7 @@ async def cb_start_course(cb: CallbackQuery, state: FSMContext):
 @router.message(HealthFSM.course_title)
 async def process_cr_title(message: Message, state: FSMContext):
     title = (message.text or "").strip()
-    await state.update_data(course_title=title)
+    await state.update_data(course_title=title, course_meds=[], course_total_price=0.0)
     await state.set_state(HealthFSM.course_days)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [btn("5 kun", "hl:crdays:5"), btn("7 kun", "hl:crdays:7"), btn("10 kun", "hl:crdays:10")],
@@ -787,27 +1134,33 @@ async def cb_cr_days(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await state.update_data(course_days=days)
     await state.set_state(HealthFSM.course_med_name)
-    await _edit_or_send(cb.message, "Dori nomini kiriting (masalan: <code>Amoksitsillin</code>):", None)
+    data = await state.get_data()
+    med_num = len(data.get("course_meds") or []) + 1
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("❌ Bekor qilish", "hl:cr:home")]])
+    await _edit_or_send(cb.message, f"<b>{med_num}-dori nomini kiriting</b> (masalan: <code>Amoksitsillin</code>):", kb)
 
 
 @router.message(HealthFSM.course_med_name)
 async def process_cr_med_name(message: Message, state: FSMContext):
     med = (message.text or "").strip()
-    await state.update_data(course_med_name=med)
+    if len(med) < 2:
+        await messenger.send("⚠️ Dori nomi kamida 2 belgidan iborat bo'lsin.", "info")
+        return
+    await state.update_data(cur_med_name=med)
     await state.set_state(HealthFSM.course_med_times)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [btn("Kuniga 1 marta (09:00)", "hl:crtimes:09:00")],
         [btn("Kuniga 2 marta (09:00, 21:00)", "hl:crtimes:09:00, 21:00")],
         [btn("Kuniga 3 marta (08:00, 14:00, 20:00)", "hl:crtimes:08:00, 14:00, 20:00")],
     ])
-    await messenger.send(with_footer("Dori ichish vaqtlarini tanlang yoki qo'lda kiriting (masalan: <code>08:00, 20:00</code>):"), "info", kb)
+    await messenger.send(with_footer(f"<b>{app.esc(med)}</b> ichish vaqtlarini tanlang yoki kiriting (masalan: <code>08:00, 20:00</code>):"), "info", kb)
 
 
 @router.callback_query(HealthFSM.course_med_times, F.data.startswith("hl:crtimes:"))
 async def cb_cr_times_select(cb: CallbackQuery, state: FSMContext):
     times_s = cb.data[len("hl:crtimes:"):]
     await cb.answer()
-    await state.update_data(course_med_times=times_s)
+    await state.update_data(cur_med_times=times_s)
     await state.set_state(HealthFSM.course_med_food)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [btn("Ovqatdan oldin", "hl:crfood:ovqatdan oldin"), btn("Ovqat bilan", "hl:crfood:ovqat bilan")],
@@ -819,7 +1172,7 @@ async def cb_cr_times_select(cb: CallbackQuery, state: FSMContext):
 @router.message(HealthFSM.course_med_times)
 async def process_cr_times_msg(message: Message, state: FSMContext):
     times_s = (message.text or "").strip()
-    await state.update_data(course_med_times=times_s)
+    await state.update_data(cur_med_times=times_s)
     await state.set_state(HealthFSM.course_med_food)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [btn("Ovqatdan oldin", "hl:crfood:ovqatdan oldin"), btn("Ovqat bilan", "hl:crfood:ovqat bilan")],
@@ -832,36 +1185,224 @@ async def process_cr_times_msg(message: Message, state: FSMContext):
 async def cb_cr_food(cb: CallbackQuery, state: FSMContext):
     food_rel = cb.data[len("hl:crfood:"):]
     await cb.answer()
+    await state.update_data(cur_med_food=food_rel)
+    await state.set_state(HealthFSM.course_med_qty)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn("➡️ Standart (10 dona)", "hl:cr_skip_qty")],
+    ])
+    await _edit_or_send(cb.message, "Ushbu dori qutisida nechta bor yoki qancha olindi? (masalan: <code>10</code> yoki <code>20</code>):", kb)
+
+
+@router.callback_query(HealthFSM.course_med_qty, F.data == "hl:cr_skip_qty")
+async def cb_cr_skip_qty(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.update_data(cur_med_qty=10.0)
+    await state.set_state(HealthFSM.course_med_price)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn("🏠 Uyda bor edi (0 so'm)", "hl:cr_skip_price")],
+    ])
+    await _edit_or_send(cb.message, "Dorining narxi qancha bo'ldi? (so'mda, masalan: <code>25000</code>):", kb)
+
+
+@router.message(HealthFSM.course_med_qty)
+async def process_cr_med_qty_msg(message: Message, state: FSMContext):
+    try:
+        qty = float((message.text or "").strip().replace(",", "."))
+        if qty <= 0:
+            raise ValueError
+    except ValueError:
+        qty = 10.0
+    await state.update_data(cur_med_qty=qty)
+    await state.set_state(HealthFSM.course_med_price)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn("🏠 Uyda bor edi (0 so'm)", "hl:cr_skip_price")],
+    ])
+    await messenger.send(with_footer("Dorining narxi qancha bo'ldi? (so'mda, masalan: <code>25000</code>):"), "info", kb)
+
+
+@router.callback_query(HealthFSM.course_med_price, F.data == "hl:cr_skip_price")
+async def cb_cr_skip_price(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await _add_med_to_course(cb.message, state, price=0.0)
+
+
+@router.message(HealthFSM.course_med_price)
+async def process_cr_med_price_msg(message: Message, state: FSMContext):
+    txt = (message.text or "").strip().lower().replace("k", "000").replace(" ", "")
+    try:
+        price = float(txt)
+        if price < 0:
+            price = 0.0
+    except ValueError:
+        price = 0.0
+    await _add_med_to_course(None, state, price=price)
+
+
+async def _add_med_to_course(target_msg, state: FSMContext, price: float):
     data = await state.get_data()
-    title = data["course_title"]
+    med_name = data.get("cur_med_name", "Dori")
+    times = data.get("cur_med_times", "09:00")
+    food = data.get("cur_med_food", "ovqatdan keyin")
+    qty = float(data.get("cur_med_qty", 10.0))
+    form = "tabletka"
+    unit = default_unit_for_form(form)
+
+    meds = list(data.get("course_meds") or [])
+    meds.append({
+        "name": med_name,
+        "times": times,
+        "food": food,
+        "qty": qty,
+        "price": price,
+        "unit": unit,
+        "form": form,
+    })
+    total_price = float(data.get("course_total_price", 0.0)) + price
+    await state.update_data(course_meds=meds, course_total_price=total_price)
+
+    title = data.get("course_title", "Kurs")
     days = data.get("course_days", 7)
-    med = data["course_med_name"]
-    times = data["course_med_times"]
+
+    lines = [
+        f"🩺 <b>Davolanish kursi: {app.esc(title)} ({days} kun)</b>\n",
+        "Kiritilgan dorilar:",
+    ]
+    for i, m in enumerate(meds, 1):
+        price_s = f"{fmt_sum(m['price'])} so'm" if m['price'] > 0 else "Uyda bor"
+        lines.append(f"{i}. <b>{app.esc(m['name'])}</b> ({m['times']}, {m['food']}) — {fmt_qty(m['qty'])} {m['unit']}, {price_s}")
+    lines.append(f"\n💰 <b>Jami xarid summasi:</b> {fmt_sum(total_price)} so'm")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn("➕ Yana dori qo'shish", "hl:cr_add_more")],
+        [btn("🏁 Kursni yakunlash", "hl:cr_finalize")],
+        [btn("❌ Bekor qilish", "hl:cr:home")],
+    ])
+    if target_msg:
+        await _edit_or_send(target_msg, "\n".join(lines), kb)
+    else:
+        await messenger.send(with_footer("\n".join(lines)), "info", kb)
+
+
+@router.callback_query(F.data == "hl:cr_add_more")
+async def cb_cr_add_more(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    data = await state.get_data()
+    med_num = len(data.get("course_meds") or []) + 1
+    await state.set_state(HealthFSM.course_med_name)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("❌ Bekor qilish", "hl:cr:home")]])
+    await _edit_or_send(cb.message, f"<b>{med_num}-dori nomini kiriting</b> (masalan: <code>Noshpa</code>):", kb)
+
+
+@router.callback_query(F.data == "hl:cr_finalize")
+async def cb_cr_finalize(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    data = await state.get_data()
+    total_price = float(data.get("course_total_price", 0.0))
+    if total_price > 0:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [btn("💳 Hisobdan yechish", "hl:cr_pay_accs")],
+            [btn("🏠 Uyda bor edi (yechilmasin)", "hl:cr_save_nopay")],
+        ])
+        await _edit_or_send(
+            cb.message,
+            f"💳 Dorilar uchun jami xarid summasi: <b>{fmt_sum(total_price)} so'm</b>\n\nUshbu summa moliyadan (Sport/Sog'liq) yechilsinmi?",
+            kb,
+        )
+    else:
+        await _save_full_course(cb.message, state, account_id=None)
+
+
+@router.callback_query(F.data == "hl:cr_pay_accs")
+async def cb_cr_pay_accs(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    accs = db.q("SELECT id, name, type, balance FROM finance_accounts WHERE is_active = 1")
+    if not accs:
+        await _save_full_course(cb.message, state, account_id=None)
+        return
+    rows = []
+    for a in accs:
+        rows.append([btn(f"💳 {a['name']} ({fmt_sum(a['balance'])} so'm)", f"hl:cr_pay_acc:{a['id']}")])
+    rows.append([btn("🏠 Uyda bor edi (yechilmasin)", "hl:cr_save_nopay")])
+    await _edit_or_send(cb.message, "Qaysi hisobdan to'landi?", InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(F.data.startswith("hl:cr_pay_acc:"))
+async def cb_cr_pay_account_chosen(cb: CallbackQuery, state: FSMContext):
+    acc_id = int(cb.data.split(":")[2])
+    await cb.answer()
+    await _save_full_course(cb.message, state, account_id=acc_id)
+
+
+@router.callback_query(F.data == "hl:cr_save_nopay")
+async def cb_cr_save_nopay(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await _save_full_course(cb.message, state, account_id=None)
+
+
+async def _save_full_course(target_msg, state: FSMContext, account_id: int | None = None):
+    data = await state.get_data()
+    title = data.get("course_title", "Davolanish kursi")
+    days = data.get("course_days", 7)
+    meds = data.get("course_meds") or []
+    total_price = float(data.get("course_total_price", 0.0))
 
     today = app.today()
     end_date = today + timedelta(days=days)
 
     cid = db.ins(
-        "INSERT INTO health_courses (title, doctor_notes, start_date, end_date, is_active) VALUES (?, ?, ?, ?, 1)",
-        (title, "Shifokor ko'rsatmasi bo'yicha", today.isoformat(), end_date.isoformat()),
+        "INSERT INTO health_courses (title, doctor_notes, start_date, end_date, is_active, total_price, is_paid) "
+        "VALUES (?, ?, ?, ?, 1, ?, ?)",
+        (title, "Shifokor ko'rsatmasi bo'yicha", today.isoformat(), end_date.isoformat(), total_price, 1 if account_id else 0),
     )
-    ci_id = db.ins(
-        "INSERT INTO health_course_items (course_id, item_name, schedule_times, dose_quantity, dose_unit, relation_to_food) "
-        "VALUES (?, ?, ?, 1, 'tabletka', ?)",
-        (cid, med, times, food_rel),
-    )
+
+    if account_id and total_price > 0 and "finance" in app.OPTIONAL:
+        fin = app.OPTIONAL["finance"]
+        cat_row = db.q1("SELECT id FROM finance_categories WHERE name = ? OR name = ?", ("Sport/Sog'liq", "Sport / Sog'liq"))
+        fin_cat_id = cat_row["id"] if cat_row else None
+        fin.record_transaction(
+            total_price,
+            "Sport / Sog'liq",
+            f"Davolanish kursi: {title}",
+            from_account_id=account_id,
+            category_id=fin_cat_id,
+            linked_kind="health_course",
+            linked_id=cid,
+        )
+
+    for m in meds:
+        db.ins(
+            "INSERT INTO health_course_items (course_id, item_name, schedule_times, dose_quantity, dose_unit, relation_to_food) "
+            "VALUES (?, ?, ?, 1, ?, ?)",
+            (cid, m["name"], m["times"], m["unit"], m["food"]),
+        )
+        # Aptechkaga avto-qo'shish yoki miqdorini oshirish
+        existing = db.q1("SELECT id, remaining_quantity FROM health_items WHERE LOWER(name) = LOWER(?)", (m["name"],))
+        if existing:
+            new_q = float(existing["remaining_quantity"]) + float(m["qty"])
+            db.ex("UPDATE health_items SET remaining_quantity = ? WHERE id = ?", (new_q, existing["id"]))
+        else:
+            db.ins(
+                "INSERT INTO health_items (name, kind, location, form, default_dosage, remaining_quantity, unit, low_stock_threshold, is_seed) "
+                "VALUES (?, 'medicine', 'home', ?, '1 dona', ?, ?, 2.0, 0)",
+                (m["name"], m.get("form", "tabletka"), m["qty"], m["unit"]),
+            )
+
     await state.clear()
     schedule_course_reminders()
 
-    await _edit_or_send(
-        cb.message,
-        f"🩺 <b>Davolanish kursi yaratildi!</b>\n\n"
-        f"• Kurs: <b>{app.esc(title)}</b> ({days} kun)\n"
-        f"• Dori: <b>{app.esc(med)}</b>\n"
-        f"• Vaqtlari: <code>{times}</code> ({food_rel})\n"
-        f"Eslatmalar avtomatik o'rnatildi.",
-        InlineKeyboardMarkup(inline_keyboard=[[btn("🩺 Kurslar ro'yxati", "hl:cr:home")]]),
-    )
+    lines = [
+        f"🩺 <b>Davolanish kursi yaratildi!</b>\n",
+        f"• Kurs: <b>{app.esc(title)}</b> ({days} kun)",
+        f"• Dorilar soni: <b>{len(meds)} ta</b>",
+    ]
+    if total_price > 0 and account_id:
+        lines.append(f"• Xarajat: <b>{fmt_sum(total_price)} so'm</b> moliyadan yechildi.")
+    lines.append("\nDorilar shaxsiy aptechkaga kiritildi va eslatmalar o'rnatildi.")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn("🩺 Kurslar ro'yxati", "hl:cr:home"), btn("💊 Aptechkaga o'tish", "hl:ap:home:0")],
+    ])
+    await _edit_or_send(target_msg, "\n".join(lines), kb)
 
 
 # Course dose reminder job execution
@@ -1244,55 +1785,6 @@ async def cb_health_week_rep(cb: CallbackQuery):
     await cb.answer()
     text = render_weekly_health_report()
     kb = InlineKeyboardMarkup(inline_keyboard=[[btn("⬅️ Salomatlik", "hl:home")]])
-    await _edit_or_send(cb.message, text, kb)
-
-
-# ------------------------------------------------------------------ 7. Tizim Diagnostikasi (/diagnostika)
-
-def render_diagnostics() -> str:
-    uptime = app.now() - app.STARTED_AT
-    days = uptime.days
-    hours = uptime.seconds // 3600
-    minutes = (uptime.seconds % 3600) // 60
-    uptime_s = f"{days} kun, {hours} soat, {minutes} daqiqa" if days else f"{hours} soat, {minutes} daqiqa"
-
-    import os
-    db_p = db.path()
-    db_size = os.path.getsize(db_p) if os.path.exists(db_p) else 0
-    if db_size >= 1024 * 1024:
-        db_size_s = f"{round(db_size / (1024 * 1024), 2)} MB"
-    else:
-        db_size_s = f"{round(db_size / 1024, 1)} KB"
-
-    jobs_cnt = len(app.scheduler.get_jobs())
-    h24 = (app.now() - timedelta(hours=24)).isoformat()
-    err_cnt = db.q1("SELECT COUNT(*) AS c FROM system_error_logs WHERE occurred_at >= ?", (h24,))["c"]
-
-    lines = [
-        "🛠 <b>AltronBek Tizim Diagnostikasi (v3.7)</b>\n",
-        f"⏱ <b>Uptime:</b> {uptime_s}",
-        f"💾 <b>Baza hajmi:</b> {db_size_s}",
-        f"⏰ <b>Faol scheduler joblar:</b> {jobs_cnt} ta",
-        f"⚠️ <b>Oxirgi 24 soatdagi xatoliklar:</b> {err_cnt} ta",
-    ]
-    return "\n".join(lines)
-
-
-@router.message(Command("diagnostika"))
-async def cmd_diagnostics(message: Message):
-    text = render_diagnostics()
-    kb = InlineKeyboardMarkup(inline_keyboard=[[btn("🔄 Yangilash", "hl:diag:ref")]])
-    await messenger.send(text, "info", kb)
-
-
-@router.callback_query(F.data == "hl:diag")
-@router.callback_query(F.data == "hl:diag:ref")
-async def cb_diag(cb: CallbackQuery):
-    await cb.answer()
-    text = render_diagnostics()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [btn("🔄 Yangilash", "hl:diag:ref"), btn("⬅️ Salomatlik", "hl:home")],
-    ])
     await _edit_or_send(cb.message, text, kb)
 
 

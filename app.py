@@ -19,7 +19,7 @@ from aiogram.enums import ParseMode  # noqa: E402
 from aiogram.fsm.storage.memory import MemoryStorage  # noqa: E402
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # noqa: E402
 
-VERSION = "3.8.5"
+VERSION = "3.9"
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "123456789:AAFakeTestTokenForAltronBek35")
 CHAT_ID = int(os.environ.get("CHAT_ID", "777000"))
@@ -27,11 +27,12 @@ COUNTRY = os.environ.get("COUNTRY", "Uzbekistan")
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Tashkent"))
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 log = logging.getLogger("altronbek")
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
-scheduler = AsyncIOScheduler(timezone=TZ)
+scheduler = AsyncIOScheduler(timezone=TZ, job_defaults={"misfire_grace_time": 900})
 
 STARTED_AT = datetime.now(TZ)
 

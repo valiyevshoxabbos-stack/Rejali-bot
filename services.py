@@ -65,33 +65,85 @@ def get_city() -> str:
 
 # ------------------------------------------------------------------ namoz vaqtlari
 
+RETRY_TIMEOUTS = [5, 10, 15, 30, 90]
+PROGRESS_BARS = {
+    1: "[▓░░░░]",
+    2: "[▓▓░░░]",
+    3: "[▓▓▓░░]",
+    4: "[▓▓▓▓░]",
+    5: "[▓▓▓▓▓]",
+}
+
+
+def format_progress_text(attempt: int, total: int, wait_sec: int) -> str:
+    bar = PROGRESS_BARS.get(attempt, "[▓▓░░░]")
+    return f"⏳ Server bilan bog'lanilmoqda...\n{bar} {attempt}/{total}-urinish ({wait_sec} soniya kutilmoqda...)"
+
+
 _prayer_cache: dict = {}
 _fail_until: dict = {}
 
 
-def fetch_prayer_times(city: str, country: str, d: date) -> dict:
-    key = (city, country, d.isoformat())
-    if key in _prayer_cache:
-        return _prayer_cache[key]
-    if _fail_until.get(key) and app.now() < _fail_until[key]:
-        raise RuntimeError("Namoz vaqtlari manbasi vaqtincha javob bermayapti")
-    try:
-        resp = requests.get(
-            "https://api.aladhan.com/v1/timingsByCity",
-            params={"city": city, "country": country, "method": METHOD, "date": d.strftime("%d-%m-%Y")},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        t = resp.json()["data"]["timings"]
-    except Exception:
-        _fail_until[key] = app.now() + timedelta(minutes=5)
-        raise
-    result = {
+def fetch_prayer_times_raw(city: str, country: str, d: date, timeout: int = 10) -> dict:
+    resp = requests.get(
+        "https://api.aladhan.com/v1/timingsByCity",
+        params={"city": city, "country": country, "method": METHOD, "date": d.strftime("%d-%m-%Y")},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    t = resp.json()["data"]["timings"]
+    return {
         "Bomdod": t["Fajr"][:5], "Quyosh": t["Sunrise"][:5], "Peshin": t["Dhuhr"][:5],
         "Asr": t["Asr"][:5], "Shom": t["Maghrib"][:5], "Xufton": t["Isha"][:5],
     }
-    _prayer_cache[key] = result
-    return result
+
+
+def fetch_prayer_times(city: str, country: str, d: date, timeout: int | None = None, on_progress=None) -> dict:
+    key = (city, country, d.isoformat())
+    if key in _prayer_cache:
+        return _prayer_cache[key]
+    cache_key = f"prayers_{city.lower()}_{country.lower()}_{d.isoformat()}"
+
+    if timeout is not None:
+        res = fetch_prayer_times_raw(city, country, d, timeout=timeout)
+        _prayer_cache[key] = res
+        db.set_api_cache(cache_key, res)
+        return res
+
+    # 5 bosqichli progressiv retry zanjiri: 5, 10, 15, 30, 90 soniya
+    last_exc = None
+    for attempt, t_sec in enumerate(RETRY_TIMEOUTS, 1):
+        if attempt > 1 and on_progress:
+            try:
+                import inspect
+                if inspect.iscoroutinefunction(on_progress):
+                    asyncio.create_task(on_progress(attempt, len(RETRY_TIMEOUTS), t_sec))
+                else:
+                    on_progress(attempt, len(RETRY_TIMEOUTS), t_sec)
+            except Exception:
+                pass
+        try:
+            res = fetch_prayer_times_raw(city, country, d, timeout=t_sec)
+            _prayer_cache[key] = res
+            db.set_api_cache(cache_key, res)
+            return res
+        except Exception as e:
+            last_exc = e
+            app.log.warning(f"Namoz vaqtlari API {attempt}/5 urinish ({t_sec}s) muvaffaqiyatsiz: {e}")
+
+    # Barcha 5 urinish muvaffaqiyatsiz bo'lsa, persistent SQLite keshdan olamiz
+    cached_payload, cached_at = db.get_api_cache(cache_key)
+    if cached_payload:
+        app.log.info(f"Namoz vaqtlari api_cache dan olindi ({cached_at})")
+        res = {**cached_payload, "from_cache": True, "cached_at": cached_at}
+        _prayer_cache[key] = res
+        return res
+
+    _fail_until[key] = app.now() + timedelta(minutes=5)
+    raise RuntimeError(f"Namoz vaqtlari manbasi 5 ta urinishdan so'ng ham javob bermayapti: {last_exc}")
+
+
+fetch_prayer_times_with_retry = fetch_prayer_times
 
 
 # ------------------------------------------------------------------ shablonlarni yuklash
@@ -416,7 +468,7 @@ def weather_location() -> dict:
     return {"lat": lat, "lon": lon, "elevation": elev, "city": city}
 
 
-def fetch_weather_raw(lat: float, lon: float, elevation: int | None) -> dict:
+def fetch_weather_raw(lat: float, lon: float, elevation: int | None, timeout: int = 5) -> dict:
     """Open-Meteo API so'rovi (bloklovchi: asyncio.to_thread orqali chaqiring)."""
     params: dict = {
         "latitude": lat,
@@ -428,33 +480,68 @@ def fetch_weather_raw(lat: float, lon: float, elevation: int | None) -> dict:
     }
     if elevation is not None:
         params["elevation"] = elevation
-    resp = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=WEATHER_TIMEOUT_SEC)
+    resp = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
 
-def get_weather_data(force: bool = False) -> dict:
-    """60–90 daqiqalik (75 daq) TTL kesh bilan ob-havo ma'lumotini qaytaradi."""
+def get_weather_data(force: bool = False, on_progress=None) -> dict:
+    """60–90 daqiqalik (75 daq) TTL kesh, 5 bosqichli retry va SQLite kesh bilan ob-havo ma'lumotini qaytaradi."""
     loc = weather_location()
-    key = (round(loc["lat"], 4), round(loc["lon"], 4), loc["elevation"], app.today().isoformat())
+    mem_key = (round(loc["lat"], 4), round(loc["lon"], 4), loc["elevation"], app.today().isoformat())
+    cache_key = f"weather_{round(loc['lat'], 4)}_{round(loc['lon'], 4)}_{loc['elevation']}_{app.today().isoformat()}"
     now = app.now()
-    cached = _weather_cache.get(key)
+
+    cached = _weather_cache.get(mem_key)
     if not force and cached and timedelta(0) <= (now - cached["fetched_at"]) < timedelta(minutes=WEATHER_TTL_MIN):
         return {**cached, "loc": loc, "from_cache": True}
-    if not force and _weather_fail_until.get(key) and now < _weather_fail_until[key]:
-        if cached:
-            return {**cached, "loc": loc, "from_cache": True}
-        raise RuntimeError("Ob-havo manbasi vaqtincha javob bermayapti")
-    try:
-        raw = fetch_weather_raw(loc["lat"], loc["lon"], loc["elevation"])
-    except Exception:
-        _weather_fail_until[key] = now + timedelta(minutes=2)
-        if cached:
-            return {**cached, "loc": loc, "from_cache": True}
-        raise
-    entry = {"raw": raw, "fetched_at": now}
-    _weather_cache[key] = entry
-    return {**entry, "loc": loc, "from_cache": False}
+
+    last_exc = None
+    for attempt, t_sec in enumerate(RETRY_TIMEOUTS, 1):
+        if attempt > 1 and on_progress:
+            try:
+                import inspect
+                if inspect.iscoroutinefunction(on_progress):
+                    asyncio.create_task(on_progress(attempt, len(RETRY_TIMEOUTS), t_sec))
+                else:
+                    on_progress(attempt, len(RETRY_TIMEOUTS), t_sec)
+            except Exception:
+                pass
+        try:
+            try:
+                raw = fetch_weather_raw(loc["lat"], loc["lon"], loc["elevation"], timeout=t_sec)
+            except TypeError:
+                raw = fetch_weather_raw(loc["lat"], loc["lon"], loc["elevation"])
+            entry = {"raw": raw, "fetched_at": now}
+            _weather_cache[mem_key] = entry
+            db.set_api_cache(cache_key, raw)
+            return {**entry, "loc": loc, "from_cache": False}
+        except Exception as e:
+            last_exc = e
+            app.log.warning(f"Ob-havo API {attempt}/5 urinish ({t_sec}s) muvaffaqiyatsiz: {e}")
+
+    # Barcha 5 urinish muvaffaqiyatsiz bo'lsa, persistent SQLite keshdan olamiz
+    cached_payload, cached_at = db.get_api_cache(cache_key)
+    if not cached_payload:
+        cached_payload, cached_at = db.get_api_cache(f"weather_{round(loc['lat'], 4)}_{round(loc['lon'], 4)}")
+    if not cached_payload:
+        cached_payload, cached_at = db.get_api_cache("weather_forecast")
+    if cached_payload:
+        app.log.info(f"Ob-havo api_cache dan olindi ({cached_at})")
+        return {
+            "raw": cached_payload,
+            "fetched_at": now,
+            "loc": loc,
+            "from_cache": True,
+            "cached_fallback": True,
+            "cached_at": cached_at,
+        }
+
+    if cached:
+        return {**cached, "loc": loc, "from_cache": True, "cached_fallback": True}
+
+    _weather_fail_until[mem_key] = now + timedelta(minutes=2)
+    raise RuntimeError(f"Ob-havo manbasi 5 ta urinishdan so'ng ham javob bermayapti: {last_exc}")
 
 
 def clothing_for_feels(feels_c: float) -> str:

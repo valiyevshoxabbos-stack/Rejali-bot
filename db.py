@@ -604,7 +604,16 @@ DELETE FROM reminders WHERE slug = 'universitet';
 DELETE FROM occurrences WHERE reminder_id IN (SELECT id FROM reminders WHERE slug = 'universitet') OR title LIKE '%Universitet darslari boshlanadi%';
 """
 
-MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9]
+MIGRATION_10 = """
+CREATE TABLE IF NOT EXISTS api_cache (
+    cache_key TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_api_cache_key ON api_cache(cache_key);
+"""
+
+MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10]
 LAST_MIGRATED_FROM: int | None = None
 
 REQUIRED_TABLES = (
@@ -832,33 +841,130 @@ def migrate() -> list[str]:
 
 
 def ensure_health_items_columns():
-    """Mavjud Railway volume bazasida health_items jadvalining barcha kerakli ustunlari mavjudligini ta'minlaydi."""
+    """Mavjud Railway volume bazasida health_items va health_courses jadvallarining barcha kerakli ustunlari mavjudligini ta'minlaydi."""
     try:
         tables = {r["name"] for r in q("SELECT name FROM sqlite_master WHERE type='table'")}
-        if "health_items" not in tables:
-            return
-        cols = {r["name"] for r in q("PRAGMA table_info(health_items)")}
-        needed = [
-            ("is_seed", "INTEGER DEFAULT 0"),
-            ("in_bag", "INTEGER DEFAULT 0"),
-            ("side_effect_flag", "INTEGER DEFAULT 0"),
-            ("expiry_date", "DATE"),
-            ("warnings", "TEXT DEFAULT ''"),
-            ("notes", "TEXT DEFAULT ''"),
-            ("low_stock_threshold", "REAL DEFAULT 2"),
-            ("default_dosage", "TEXT DEFAULT ''"),
-            ("form", "TEXT DEFAULT 'tabletka'"),
-            ("location", "TEXT DEFAULT 'home'"),
-            ("kind", "TEXT DEFAULT 'medicine'"),
-        ]
-        for col_name, col_def in needed:
-            if col_name not in cols:
+        if "health_items" in tables:
+            cols = {r["name"] for r in q("PRAGMA table_info(health_items)")}
+            needed = [
+                ("is_seed", "INTEGER DEFAULT 0"),
+                ("in_bag", "INTEGER DEFAULT 0"),
+                ("side_effect_flag", "INTEGER DEFAULT 0"),
+                ("expiry_date", "DATE"),
+                ("warnings", "TEXT DEFAULT ''"),
+                ("notes", "TEXT DEFAULT ''"),
+                ("low_stock_threshold", "REAL DEFAULT 2"),
+                ("default_dosage", "TEXT DEFAULT ''"),
+                ("form", "TEXT DEFAULT 'tabletka'"),
+                ("location", "TEXT DEFAULT 'home'"),
+                ("kind", "TEXT DEFAULT 'medicine'"),
+            ]
+            for col_name, col_def in needed:
+                if col_name not in cols:
+                    try:
+                        ex(f"ALTER TABLE health_items ADD COLUMN {col_name} {col_def}")
+                    except Exception:
+                        pass
+        if "health_courses" in tables:
+            c_cols = {r["name"] for r in q("PRAGMA table_info(health_courses)")}
+            if "total_price" not in c_cols:
                 try:
-                    ex(f"ALTER TABLE health_items ADD COLUMN {col_name} {col_def}")
+                    ex("ALTER TABLE health_courses ADD COLUMN total_price REAL DEFAULT 0")
+                except Exception:
+                    pass
+            if "is_paid" not in c_cols:
+                try:
+                    ex("ALTER TABLE health_courses ADD COLUMN is_paid BOOLEAN DEFAULT 0")
                 except Exception:
                     pass
     except Exception:
         pass
+
+
+def get_api_cache(cache_key: str) -> tuple[dict | None, str | None]:
+    """api_cache jadvalidan oxirgi keshlangan ma'lumotni qaytaradi: (payload_dict, updated_at)."""
+    try:
+        tables = {r["name"] for r in q("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "api_cache" not in tables:
+            return None, None
+        row = q1("SELECT payload_json, updated_at FROM api_cache WHERE cache_key = ?", (cache_key,))
+        if row and row["payload_json"]:
+            import json
+            return json.loads(row["payload_json"]), str(row["updated_at"])
+    except Exception as e:
+        log.warning(f"api_cache o'qishda xatolik ({cache_key}): {e}")
+    return None, None
+
+
+def set_api_cache(cache_key: str, payload: dict):
+    """api_cache jadvaliga ma'lumotni keshlaydi."""
+    try:
+        import json
+        tables = {r["name"] for r in q("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "api_cache" not in tables:
+            ex("""CREATE TABLE IF NOT EXISTS api_cache (
+                cache_key TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""")
+        payload_str = json.dumps(payload, ensure_ascii=False)
+        ex(
+            "INSERT INTO api_cache (cache_key, payload_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(cache_key) DO UPDATE SET payload_json=excluded.payload_json, updated_at=CURRENT_TIMESTAMP",
+            (cache_key, payload_str),
+        )
+    except Exception as e:
+        log.warning(f"api_cache yozishda xatolik ({cache_key}): {e}")
+
+
+def log_error(error_type: str, error_message: str, traceback_text: str = "", context_info: str = ""):
+    """Tizim xatolarini system_error_logs jadvaliga xavfsiz yozadi."""
+    try:
+        tables = {r["name"] for r in q("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "system_error_logs" in tables:
+            ex(
+                "INSERT INTO system_error_logs (error_type, error_message, traceback_text, context_info, occurred_at) "
+                "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (error_type, str(error_message)[:500], traceback_text[:1500], context_info[:500]),
+            )
+    except Exception as e:
+        log.error(f"Xatoni system_error_logs ga yozishda xatolik: {e}")
+
+
+def get_recent_errors(limit: int = 15, offset: int = 0) -> tuple[list[dict], int]:
+    """system_error_logs jadvalidan so'nggi xatolar va umumiy sonini qaytaradi."""
+    try:
+        tables = {r["name"] for r in q("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "system_error_logs" not in tables:
+            return [], 0
+        total = q1("SELECT COUNT(*) AS c FROM system_error_logs")["c"]
+        rows = q(
+            "SELECT * FROM system_error_logs ORDER BY occurred_at DESC, id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        return rows, total
+    except Exception:
+        return [], 0
+
+
+def clear_error_logs():
+    """system_error_logs jadvalini tozalaydi."""
+    try:
+        tables = {r["name"] for r in q("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "system_error_logs" in tables:
+            ex("DELETE FROM system_error_logs")
+    except Exception as e:
+        log.error(f"system_error_logs tozalashda xatolik: {e}")
+
+
+def add_custom_health_category(name: str, icon: str = "💊", kind: str = "medicine") -> int:
+    """Foydalanuvchi tomonidan yangi kategoriya qo'shish."""
+    max_sort = q1("SELECT MAX(sort_order) AS m FROM health_categories")["m"] or 10
+    return ins(
+        "INSERT INTO health_categories (name, kind, icon, is_system, is_default, sort_order) "
+        "VALUES (?, ?, ?, 0, 1, ?) ON CONFLICT(name) DO UPDATE SET icon=excluded.icon",
+        (name.strip(), kind, icon.strip(), max_sort + 1),
+    )
 
 
 def init_db() -> list[str]:
@@ -948,6 +1054,11 @@ SEED_HEALTH_CATEGORIES = [
     ("Namlantirish va tiklash", "skincare", "🧴", 1, 1, 8),
     ("Quyoshdan himoya (SPF)", "skincare", "☀️", 1, 1, 9),
     ("Lab va qo'l parvarishi", "skincare", "💄", 1, 1, 10),
+    ("Ko'z / Quloq / Burun", "medicine", "👁", 1, 1, 11),
+    ("Tomoq / Yo'tal", "medicine", "🗣", 1, 1, 12),
+    ("Tish / Og'iz bo'shlig'i", "medicine", "🦷", 1, 1, 13),
+    ("Asab / Uyqu", "medicine", "🧠", 1, 1, 14),
+    ("Yurak / Qon bosimi", "medicine", "❤️", 1, 1, 15),
 ]
 
 SEED_HEALTH_ITEMS = [

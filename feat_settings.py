@@ -8,6 +8,7 @@ import csv
 import io
 import os
 import tempfile
+from datetime import datetime, timedelta
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -76,14 +77,138 @@ async def cb_status(cb: CallbackQuery):
     await nav(cb, status.build_text(), [[BACK]])
 
 
+# ------------------------------------------------------------------ texnik diagnostika (/diagnostika)
+
+def render_diagnostics() -> tuple[str, InlineKeyboardMarkup]:
+    uptime = app.now() - app.STARTED_AT
+    days = uptime.days
+    hours = uptime.seconds // 3600
+    minutes = (uptime.seconds % 3600) // 60
+    uptime_s = f"{days} kun, {hours} soat, {minutes} daqiqa" if days else f"{hours} soat, {minutes} daqiqa"
+
+    db_p = db.path()
+    db_size = os.path.getsize(db_p) if os.path.exists(db_p) else 0
+    if db_size >= 1024 * 1024:
+        db_size_s = f"{round(db_size / (1024 * 1024), 2)} MB"
+    else:
+        db_size_s = f"{round(db_size / 1024, 1)} KB"
+
+    try:
+        integrity_row = db.q1("PRAGMA integrity_check")
+        integrity = integrity_row["integrity_check"] if integrity_row else "noma'lum"
+    except Exception:
+        integrity = "tekshirib bo'lmadi"
+
+    all_jobs = app.scheduler.get_jobs()
+    rem_cnt = sum(1 for j in all_jobs if j.id.startswith("rem_"))
+    edu_cnt = sum(1 for j in all_jobs if j.id.startswith("edu_"))
+    uni_cnt = sum(1 for j in all_jobs if j.id.startswith("uni_"))
+    qazo_cnt = sum(1 for j in all_jobs if j.id.startswith("qazo_"))
+    other_cnt = max(0, len(all_jobs) - (rem_cnt + edu_cnt + uni_cnt + qazo_cnt))
+
+    h24 = (app.now() - timedelta(hours=24)).isoformat()
+    try:
+        total_errs = db.q1("SELECT COUNT(*) AS c FROM system_error_logs")["c"]
+        err_24h = db.q1("SELECT COUNT(*) AS c FROM system_error_logs WHERE occurred_at >= ?", (h24,))["c"]
+    except Exception:
+        total_errs = 0
+        err_24h = 0
+
+    lines = [
+        "🛠 <b>AltronBek Tizim Diagnostikasi (v3.9)</b>\n",
+        f"⏱ <b>Uptime:</b> {uptime_s}",
+        f"💾 <b>Baza hajmi:</b> {db_size_s}",
+        f"🛡 <b>Baza yaxlitligi:</b> <code>{integrity}</code>",
+        f"⏰ <b>Faol scheduler joblar:</b> {len(all_jobs)} ta",
+        f"   • 🔔 Eslatmalar (rem_*): {rem_cnt} ta",
+        f"   • 🏫 Maktab (edu_*): {edu_cnt} ta",
+        f"   • 🏛 Universitet (uni_*): {uni_cnt} ta",
+        f"   • 🕌 Qazo (qazo_*): {qazo_cnt} ta",
+        f"   • ⚙️ Boshqa / Cron: {other_cnt} ta",
+        f"⚠️ <b>Xatolar:</b> oxirgi 24 soatda {err_24h} ta (jami: {total_errs} ta)",
+    ]
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [btn(f"⚠️ Xatolar jurnali ({total_errs} ta)", "diag:errs:0")],
+        [btn("🔄 Bugungi eslatmalarni qayta yuklash", "diag:reload")],
+        [btn("💾 Zaxira nusxa olish", "diag:bk")],
+        [BACK],
+    ])
+    return "\n".join(lines), kb
+
+
+@router.message(Command("diagnostika"))
+async def cmd_diagnostics(message: Message):
+    text, kb = render_diagnostics()
+    await messenger.send(text, "info", kb)
+
+
 @router.callback_query(F.data == "se:diag")
 async def cb_settings_diag(cb: CallbackQuery):
-    if "health" in app.OPTIONAL:
-        diag_txt = app.OPTIONAL["health"].render_diagnostics()
+    await cb.answer()
+    text, kb = render_diagnostics()
+    await cb.message.edit_text(text, reply_markup=messenger.with_delete(kb))
+
+
+@router.callback_query(F.data == "diag:reload")
+async def cb_diag_reload(cb: CallbackQuery):
+    await cb.answer("Eslatmalar qayta rejalashtirilmoqda...", show_alert=False)
+    import jobs
+    await jobs.schedule_today()
+    job_cnt = len(app.scheduler.get_jobs())
+    text, kb = render_diagnostics()
+    confirm_text = f"✅ <b>Bugungi barcha eslatmalar qayta yuklandi!</b> (Faol joblar: {job_cnt} ta)\n\n" + text
+    await cb.message.edit_text(confirm_text, reply_markup=messenger.with_delete(kb))
+
+
+@router.callback_query(F.data == "diag:bk")
+async def cb_diag_bk(cb: CallbackQuery):
+    await cb.answer("Zaxira nusxa yuborilmoqda...")
+    await send_backup("💾 Diagnostika: SQLite zaxira nusxasi")
+
+
+@router.callback_query(F.data.startswith("diag:errs:"))
+async def cb_diag_errors(cb: CallbackQuery):
+    offset = int(cb.data.split(":")[2])
+    limit = 5
+    rows, total = db.get_recent_errors(limit=limit, offset=offset)
+
+    lines = [f"⚠️ <b>Tizim Xatoliklari Jurnali</b> (Jami: {total} ta)\n"]
+    if not rows:
+        lines.append("<i>Jurnalda hech qanday xatolik qayd etilmagan. Tizim barqaror ishlamoqda!</i>")
     else:
-        import feat_health
-        diag_txt = feat_health.render_diagnostics()
-    await nav(cb, diag_txt, [[btn("🔄 Yangilash", "se:diag"), BACK]])
+        for idx, r in enumerate(rows, start=offset + 1):
+            t_s = r["occurred_at"][:16].replace("T", " ")
+            lines.append(f"<b>#{idx}. [{t_s}] {app.esc(r['error_type'])}</b>")
+            lines.append(f"<code>{app.esc(r['error_message'][:150])}</code>")
+            if r.get("context_info"):
+                lines.append(f"📍 <i>{app.esc(r['context_info'][:60])}</i>")
+            lines.append("")
+
+    kb_rows = []
+    nav = []
+    if offset > 0:
+        nav.append(btn("⬅️ Oldingi", f"diag:errs:{max(0, offset - limit)}"))
+    if offset + limit < total:
+        nav.append(btn("Keyingi ➡️", f"diag:errs:{offset + limit}"))
+    if nav:
+        kb_rows.append(nav)
+
+    if total > 0:
+        kb_rows.append([btn("🧹 Jurnalni tozalash", "diag:clear_errs")])
+    kb_rows.append([btn("⬅️ Diagnostikaga qaytish", "se:diag")])
+
+    await cb.answer()
+    await cb.message.edit_text("\n".join(lines), reply_markup=messenger.with_delete(InlineKeyboardMarkup(inline_keyboard=kb_rows)))
+
+
+@router.callback_query(F.data == "diag:clear_errs")
+async def cb_diag_clear_errs(cb: CallbackQuery):
+    db.clear_error_logs()
+    await cb.answer("Xatolar jurnali tozalandi!", show_alert=True)
+    text, kb = render_diagnostics()
+    await cb.message.edit_text(text, reply_markup=messenger.with_delete(kb))
+
 
 
 # ------------------------------------------------------------------ joylashuv
@@ -481,8 +606,14 @@ async def weekly_backup():
             await send_backup("📤 Haftalik avtomatik zaxira")
         except Exception as e:
             app.log.error(f"Zaxirada xatolik: {e}")
+    # 30 kundan eski xatolar logini tozalash
+    try:
+        cutoff = (app.now() - timedelta(days=30)).isoformat()
+        db.ex("DELETE FROM system_error_logs WHERE occurred_at < ?", (cutoff,))
+    except Exception as e:
+        app.log.error(f"Eski loglarni tozalashda xatolik: {e}")
 
 
 def register_jobs(scheduler):
-    scheduler.add_job(weekly_backup, CronTrigger(day_of_week="sun", hour=21, minute=0),
+    scheduler.add_job(weekly_backup, CronTrigger(day_of_week="sun", hour=22, minute=0),
                       id="weekly_backup", replace_existing=True)

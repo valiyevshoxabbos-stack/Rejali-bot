@@ -613,7 +613,44 @@ CREATE TABLE IF NOT EXISTS api_cache (
 CREATE INDEX IF NOT EXISTS idx_api_cache_key ON api_cache(cache_key);
 """
 
-MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10]
+MIGRATION_11 = """
+CREATE TABLE IF NOT EXISTS health_courses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    doctor_notes TEXT DEFAULT '',
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    is_active BOOLEAN DEFAULT 1,
+    status TEXT DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS health_course_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER REFERENCES health_courses(id),
+    item_id INTEGER NULL REFERENCES health_items(id),
+    item_name TEXT NOT NULL,
+    schedule_times TEXT NOT NULL,
+    dose_quantity REAL DEFAULT 1,
+    dose_unit TEXT DEFAULT 'tabletka',
+    relation_to_food TEXT DEFAULT 'ovqatdan keyin',
+    duration_days INTEGER DEFAULT 7,
+    start_date DATE,
+    meal_rule TEXT DEFAULT 'any',
+    linked_accessory_id INTEGER NULL REFERENCES health_items(id),
+    is_active BOOLEAN DEFAULT 1
+);
+
+ALTER TABLE health_course_items ADD COLUMN item_id INTEGER NULL REFERENCES health_items(id);
+ALTER TABLE health_course_items ADD COLUMN duration_days INTEGER DEFAULT 7;
+ALTER TABLE health_course_items ADD COLUMN start_date DATE;
+ALTER TABLE health_course_items ADD COLUMN meal_rule TEXT DEFAULT 'any';
+ALTER TABLE health_course_items ADD COLUMN linked_accessory_id INTEGER NULL REFERENCES health_items(id);
+
+ALTER TABLE health_courses ADD COLUMN status TEXT DEFAULT 'active';
+"""
+
+MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10, MIGRATION_11]
 LAST_MIGRATED_FROM: int | None = None
 
 REQUIRED_TABLES = (
@@ -828,7 +865,13 @@ def migrate() -> list[str]:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 for stmt in _split_sql(MIGRATIONS[i]):
-                    conn.execute(stmt)
+                    try:
+                        conn.execute(stmt)
+                    except sqlite3.OperationalError as oe:
+                        oe_msg = str(oe).lower()
+                        if "duplicate column name" in oe_msg or "already exists" in oe_msg:
+                            continue
+                        raise
                 conn.execute(f"PRAGMA user_version = {target}")
                 conn.execute("COMMIT")
             except Exception:
@@ -877,6 +920,26 @@ def ensure_health_items_columns():
                     ex("ALTER TABLE health_courses ADD COLUMN is_paid BOOLEAN DEFAULT 0")
                 except Exception:
                     pass
+            if "status" not in c_cols:
+                try:
+                    ex("ALTER TABLE health_courses ADD COLUMN status TEXT DEFAULT 'active'")
+                except Exception:
+                    pass
+        if "health_course_items" in tables:
+            ci_cols = {r["name"] for r in q("PRAGMA table_info(health_course_items)")}
+            ci_needed = [
+                ("item_id", "INTEGER NULL REFERENCES health_items(id)"),
+                ("duration_days", "INTEGER DEFAULT 7"),
+                ("start_date", "DATE"),
+                ("meal_rule", "TEXT DEFAULT 'any'"),
+                ("linked_accessory_id", "INTEGER NULL REFERENCES health_items(id)"),
+            ]
+            for col_name, col_def in ci_needed:
+                if col_name not in ci_cols:
+                    try:
+                        ex(f"ALTER TABLE health_course_items ADD COLUMN {col_name} {col_def}")
+                    except Exception:
+                        pass
     except Exception:
         pass
 
@@ -919,6 +982,8 @@ def set_api_cache(cache_key: str, payload: dict):
 
 def log_error(error_type: str, error_message: str, traceback_text: str = "", context_info: str = ""):
     """Tizim xatolarini system_error_logs jadvaliga xavfsiz yozadi."""
+    if "message is not modified" in str(error_message).lower():
+        return
     try:
         tables = {r["name"] for r in q("SELECT name FROM sqlite_master WHERE type='table'")}
         if "system_error_logs" in tables:
@@ -1059,6 +1124,7 @@ SEED_HEALTH_CATEGORIES = [
     ("Tish / Og'iz bo'shlig'i", "medicine", "🦷", 1, 1, 13),
     ("Asab / Uyqu", "medicine", "🧠", 1, 1, 14),
     ("Yurak / Qon bosimi", "medicine", "❤️", 1, 1, 15),
+    ("Tibbiy buyumlar / Aksessuarlar", "medicine", "💉", 1, 1, 16),
 ]
 
 SEED_HEALTH_ITEMS = [

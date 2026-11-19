@@ -294,6 +294,9 @@ def add_basket_item(
     return {"ok": True, "basket_item_id": bitem_id, "item_id": item["id"], "unit_price": u_price, "total_price": tot}
 
 
+add_item_to_basket = add_basket_item
+
+
 def set_basket_item_price(
     bitem_id: int,
     total_price: float,

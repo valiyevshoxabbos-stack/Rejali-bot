@@ -10,6 +10,7 @@ import asyncio
 from datetime import date, timedelta
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -182,7 +183,13 @@ async def cb_switch_day(cb: CallbackQuery):
     day_key = cb.data.split(":")[1]
     await cb.answer()
     text, kb, anim_msg = await _build_screen(day_key, force=False, existing_msg=cb.message)
-    await cb.message.edit_text(text, reply_markup=messenger.with_delete(kb))
+    now_time = app.now().strftime("%H:%M:%S")
+    text += f"\n\n🔄 <i>Yangilandi: {now_time}</i>"
+    try:
+        await cb.message.edit_text(text, reply_markup=messenger.with_delete(kb))
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
 
 
 @router.callback_query(F.data.startswith("wx:ref:"))
@@ -190,4 +197,10 @@ async def cb_refresh(cb: CallbackQuery):
     day_key = cb.data.split(":")[2]
     await cb.answer("Yangilandi")
     text, kb, anim_msg = await _build_screen(day_key, force=True, existing_msg=cb.message)
-    await cb.message.edit_text(text, reply_markup=messenger.with_delete(kb))
+    now_time = app.now().strftime("%H:%M:%S")
+    text += f"\n\n🔄 <i>Yangilandi: {now_time}</i>"
+    try:
+        await cb.message.edit_text(text, reply_markup=messenger.with_delete(kb))
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise

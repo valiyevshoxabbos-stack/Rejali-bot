@@ -74,6 +74,14 @@ CHANGELOGS: dict[str, str] = {
         "• 🛠 <b>Kengaytirilgan Diagnostika (/diagnostika):</b> Uptime, DB hajmi, scheduler holati, xatolar jurnali va zaxira nusxa.\n"
         "• 💊 <b>Dorixona & Davolanish Kursi:</b> Ko'p dorili kurslar, aptechka bilan avto-sinxronizatsiya, yangi kategoriyalar va tahrirlash paneli."
     ),
+    "3.9.1": (
+        "🚀 <b>AltronBek v3.9.1 yangilanishi muvaffaqiyatli o'rnatildi!</b>\n"
+        "• 🩺 <b>Davolanish Kurslari 2.0:</b> Aptechkadan tanlash, individual muddatlar (5 va 10 kun), ovqat qoidalari va aksessuarlar (shprits) bog'lash.\n"
+        "• 🛒 <b>Smart Bozorlik Integratsiyasi:</b> Kurs uchun yetishmayotgan dori va vositalarni bir tugma bilan rejalashtirilgan savatga qo'shish.\n"
+        "• ❌ <b>Kursni Bekor Qilish:</b> Faol kursni to'xtatish va unga bog'liq scheduler eslatmalarini darhol o'chirish.\n"
+        "• 🔍 <b>Dorixona Qidiruv & Tugayotganlar:</b> Kam qolgan (≤2) vositalar filtri va nom bo'yicha tezkor qidiruv.\n"
+        "• 🛡 <b>Telegram Barqarorligi:</b> 'Message is not modified' xatolari filtri va ob-havoda jonli yangilanish vaqti."
+    ),
 }
 
 COMMANDS = [
@@ -177,6 +185,9 @@ def setup():
         exc = event.exception
         err_type = type(exc).__name__
         err_msg = str(exc)
+        if "message is not modified" in err_msg.lower():
+            return True
+
         tb_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         ctx_info = str(getattr(event, "update", ""))
 

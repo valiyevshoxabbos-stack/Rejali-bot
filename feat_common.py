@@ -53,16 +53,18 @@ async def clear_prompts(state: FSMContext):
 # ------------------------------------------------------------------ asosiy menyu (doimiy tugmalar)
 
 T_TODAY, T_ADD = "📅 Bugun", "➕ Qo'shish"
+T_AI = "🤖 AI Suhbat"
 T_CHALLENGES, T_FINANCE = "🏆 Chelenjlar", "💰 Moliya"
 T_EDU, T_HEALTH = "🎓 Ta'lim", "💊 Dorixona"
 T_CALC, T_WEATHER = "🧮 Hisob", "🌦 Ob-havo"
 T_STATS, T_SETTINGS = "📊 Statistika", "⚙️ Sozlamalar"
-MENU_TEXTS = {T_TODAY, T_ADD, T_CHALLENGES, T_FINANCE, T_EDU, T_HEALTH, T_CALC, T_WEATHER, T_STATS, T_SETTINGS, "🎓 Maktab"}
+MENU_TEXTS = {T_TODAY, T_ADD, T_AI, T_CHALLENGES, T_FINANCE, T_EDU, T_HEALTH, T_CALC, T_WEATHER, T_STATS, T_SETTINGS, "🎓 Maktab"}
 
 
 def main_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=T_TODAY), KeyboardButton(text=T_ADD)],
+                  [KeyboardButton(text=T_AI)],
                   [KeyboardButton(text=T_CHALLENGES), KeyboardButton(text=T_FINANCE)],
                   [KeyboardButton(text=T_EDU), KeyboardButton(text=T_HEALTH)],
                   [KeyboardButton(text=T_CALC), KeyboardButton(text=T_WEATHER)],

@@ -195,4 +195,5 @@ async def cb_delete(cb: CallbackQuery):
 
 
 def register_jobs(scheduler):
-    scheduler.add_job(notice_job, CronTrigger(hour=9, minute=0), id="birthdays", replace_existing=True)
+    # daily_notice (tug'ilgan kunlar) endi system_schedules orqali jobs.schedule_today() da dinamik boshqariladi
+    pass

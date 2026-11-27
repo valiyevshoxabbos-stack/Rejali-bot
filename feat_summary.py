@@ -14,6 +14,7 @@ import feat_birthdays as birthdays
 import feat_challenges as challenges
 import feat_finance as finance
 import feat_journal as journal
+import feat_schedules as schedules
 import feat_sleep as sleep
 import feat_weather as weather
 import messenger
@@ -82,6 +83,10 @@ async def build_today_text() -> str:
         icon = scoring.PRIORITY_ICON.get(r["priority"], "")
         tag = " (ixtiyoriy)" if r["eff_mode"] == "optional" else ""
         items.append((r["start"], f"{icon} {app.esc(r['title'])}{tag}".strip()))
+    for dr in schedules.get_dynamic_reminders_for_date(d):
+        kind_ic = "🚧" if dr["kind"] == "busy_block" else "⏰"
+        span = f"{dr['start_time']}–{dr['end_time']}" if dr.get("end_time") else dr["start_time"]
+        items.append((dr["start_time"], f"{kind_ic} {app.esc(dr['title'])} ({span})"))
     times = await prayer_times_today()
     if times:
         items += [(times[p], f"{p} namozi") for p in PRAYERS]
@@ -139,7 +144,8 @@ async def send_morning():
     bdays = birthdays.today_lines(d)
     if bdays:
         text += "\n\n" + "\n".join(bdays)
-    await messenger.send(text + qazo_block(), "summary", bind_trigger=False)
+    full_text, kb = schedules.attach_sticky_notes("morning_summary", text + qazo_block(), None, add_snooze=True)
+    await messenger.send(full_text, "summary", kb, bind_trigger=False)
     await journal.sync(d)
 
 
@@ -172,10 +178,16 @@ async def send_evening():
 
     ch_text, ch_kb = challenges.evening_challenges_section_and_kb(d)
     tom_wx = await weather.evening_tomorrow_section()
-    await messenger.send(
+    full_text, full_kb = schedules.attach_sticky_notes(
+        "evening_summary",
         "\n".join(lines) + notes_block + ch_text + tom_wx + qazo_block(),
-        "summary",
         ch_kb,
+        add_snooze=True,
+    )
+    await messenger.send(
+        full_text,
+        "summary",
+        full_kb,
         bind_trigger=False,
     )
 
@@ -194,6 +206,5 @@ async def send_sunday_weekly_review():
 
 
 def register_jobs(scheduler):
-    scheduler.add_job(send_morning, CronTrigger(hour=6, minute=30), id="morning", replace_existing=True)
-    scheduler.add_job(send_evening, CronTrigger(hour=21, minute=45), id="evening", replace_existing=True)
+    # morning_summary va evening_summary endi system_schedules orqali jobs.schedule_today() da dinamik boshqariladi
     scheduler.add_job(send_sunday_weekly_review, CronTrigger(day_of_week="sun", hour=21, minute=0), id="sunday_weekly_review", replace_existing=True)

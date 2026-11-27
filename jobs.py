@@ -9,6 +9,7 @@ import app
 import db
 import feat_qazo
 import feat_reminders
+import feat_schedules
 import feat_sleep
 import feat_summary
 import messenger
@@ -16,7 +17,7 @@ import qazo as qz
 import services as sv
 
 PRAYERS = ("Bomdod", "Peshin", "Asr", "Shom", "Xufton")
-JOB_PREFIXES = ("rem_", "info_", "qazo_dl_", "edu_pre_", "edu_post_", "uni_pre_", "uni_bag_", "uni_leave_")
+JOB_PREFIXES = ("rem_", "info_", "qazo_dl_", "edu_pre_", "edu_post_", "uni_pre_", "uni_bag_", "uni_leave_", "sys_sched_", "dyn_rem_")
 
 
 async def send_info(text: str):
@@ -80,6 +81,7 @@ async def schedule_today():
         db.log_error("OccurrencesError", str(e), traceback.format_exc(), "jobs.schedule_today")
 
     # 4. Namoz vaqtlari va qazo muddatlari (Tashqi API)
+    times = None
     try:
         times = await feat_summary.prayer_times_today()
         if times:
@@ -102,6 +104,19 @@ async def schedule_today():
         db.log_error("PrayerScheduleError", str(e), traceback.format_exc(), "jobs.schedule_today")
         app.log.warning(f"Namoz vaqtlarini rejalashtirishda xatolik (lokal eslatmalar daxlsiz qoldi): {e}")
 
+    # 4.5. Dinamik tizim vaqtlari (system_schedules) va dinamik eslatmalar (dynamic_reminders)
+    try:
+        feat_schedules.schedule_system_jobs(prayer_times=times, d=today)
+    except Exception as e:
+        db.log_error("SystemSchedulesError", str(e), traceback.format_exc(), "jobs.schedule_today")
+        app.log.warning(f"Dinamik tizim vaqtlarini rejalashtirishda xatolik: {e}")
+
+    try:
+        feat_schedules.schedule_dynamic_reminders(d=today)
+    except Exception as e:
+        db.log_error("DynamicRemindersError", str(e), traceback.format_exc(), "jobs.schedule_today")
+        app.log.warning(f"Dinamik eslatmalarni rejalashtirishda xatolik: {e}")
+
     # 5. Maktab ta'lim darslari
     if "education" in app.OPTIONAL:
         try:
@@ -113,7 +128,7 @@ async def schedule_today():
     # 6. Universitet darslari
     if "uni" in app.OPTIONAL:
         try:
-            await app.OPTIONAL["uni"].schedule_today_uni()
+            await app.OPTIONAL["uni"].schedule_today_uni(prayer_times=times)
         except Exception as e:
             db.log_error("UniScheduleError", str(e), traceback.format_exc(), "jobs.schedule_today")
             app.log.warning(f"Universitet darslarini rejalashtirishda xatolik: {e}")
@@ -155,6 +170,11 @@ async def self_healing_check():
                         dl = dts[idx + 1] + timedelta(minutes=qz.QAZO_GRACE_MINUTES)
                         if dl > now:
                             app.schedule_job(dl, feat_qazo.check_qazo, [], f"qazo_dl_{idx}")
+                # Namoz vaqti tiklangach relative_prayer tizim vaqtlarini ham qayta hisoblash
+                try:
+                    feat_schedules.schedule_system_jobs(prayer_times=times, d=today)
+                except Exception:
+                    pass
                 app.log.info(f"Self-healing: {today} uchun namoz eslatmalari avto-tiklandi.")
         except Exception as e:
             app.log.debug(f"Self-healing tekshiruvida kutish: {e}")
@@ -164,9 +184,19 @@ def register_jobs(scheduler):
     scheduler.add_job(schedule_today, CronTrigger(hour=0, minute=5), id="daily_scheduler", replace_existing=True)
     scheduler.add_job(self_healing_check, CronTrigger(minute="*/30"), id="self_healing_job", replace_existing=True)
     if "education" in app.OPTIONAL:
+        # Dinamik system_schedules dan vaqtni o'qiymiz (default 20:00)
+        hr, mn = 20, 0
+        try:
+            s = feat_schedules.get_system_schedule("edu_evening_preview")
+            if s and not int(s.get("is_enabled", 1)):
+                return
+            if s and s.get("time_hhmm") and ":" in s["time_hhmm"]:
+                hr, mn = (int(x) for x in s["time_hhmm"].split(":")[:2])
+        except Exception:
+            pass
         scheduler.add_job(
             app.OPTIONAL["education"].send_evening_preview,
-            CronTrigger(hour=20, minute=0),
+            CronTrigger(hour=hr, minute=mn),
             id="edu_evening_preview",
             replace_existing=True,
         )

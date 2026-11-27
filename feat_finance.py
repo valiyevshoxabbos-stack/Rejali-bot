@@ -950,8 +950,7 @@ async def check_finance_alerts(now_dt: datetime | None = None) -> int:
 
 
 def register_jobs(scheduler):
-    scheduler.add_job(check_finance_alerts, CronTrigger(hour=9, minute=30), id="finance_am", replace_existing=True)
-    scheduler.add_job(check_finance_alerts, CronTrigger(hour=15, minute=0), id="finance_pm", replace_existing=True)
+    # finance_alerts va finance_alerts_pm endi system_schedules orqali jobs.schedule_today() da dinamik boshqariladi
     scheduler.add_job(
         run_auto_archive_and_vacuum,
         IntervalTrigger(days=ARCHIVE_DAYS),

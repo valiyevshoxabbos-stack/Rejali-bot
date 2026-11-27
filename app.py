@@ -19,12 +19,21 @@ from aiogram.enums import ParseMode  # noqa: E402
 from aiogram.fsm.storage.memory import MemoryStorage  # noqa: E402
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # noqa: E402
 
-VERSION = "3.9.1"
+VERSION = "4.0.1"
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "123456789:AAFakeTestTokenForAltronBek35")
 CHAT_ID = int(os.environ.get("CHAT_ID", "777000"))
 COUNTRY = os.environ.get("COUNTRY", "Uzbekistan")
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Tashkent"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
+
+def get_gemini_api_key() -> str:
+    """GEMINI_API_KEY muhit o'zgaruvchisini xavfsiz o'qiydi (bo'sh bo'lsa '' qaytaradi)."""
+    env_val = os.getenv("GEMINI_API_KEY")
+    if env_val is not None:
+        return env_val.strip()
+    return GEMINI_API_KEY
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)

@@ -21,10 +21,10 @@ import messenger
 import services as sv
 
 CORE = [
-    "menu", "reminders", "qazo", "sleep", "birthdays", "weight",
+    "menu", "schedules", "reminders", "qazo", "sleep", "birthdays", "weight",
     "stats", "settings", "cleanup", "summary", "status", "restore",
 ]
-OPTIONAL = ["weather", "calculator", "challenges", "finance", "market", "health", "education", "uni"]
+OPTIONAL = ["weather", "calculator", "challenges", "finance", "market", "health", "education", "uni", "ai"]
 
 CHANGELOGS: dict[str, str] = {
     "3.6": (
@@ -82,9 +82,18 @@ CHANGELOGS: dict[str, str] = {
         "• 🔍 <b>Dorixona Qidiruv & Tugayotganlar:</b> Kam qolgan (≤2) vositalar filtri va nom bo'yicha tezkor qidiruv.\n"
         "• 🛡 <b>Telegram Barqarorligi:</b> 'Message is not modified' xatolari filtri va ob-havoda jonli yangilanish vaqti."
     ),
+    "4.0.1": (
+        "🚀 <b>AltronBek v4.0.1 yangilanishi muvaffaqiyatli o'rnatildi!</b>\n"
+        "• 🤖 <b>Gemini AI Core & Suhbat:</b> Barcha 9 modul bilan ishlaydigan shaxsiy AI yordamchi va ovozli xabarlarni (multimodal) tushunish.\n"
+        "• 🧭 <b>Smart Model Router:</b> Avtomatik zaxira (auto-fallback), cooldown, tezlik statistikasi va kodsiz Paid/Fixed rejim.\n"
+        "• 🛡 <b>Human-in-the-Loop & Izolyatsiya:</b> Barcha yozish/tahrirlash amallari faqat qo'lda tasdiqlangach bajariladi; AI to'xtasa ham bot 100% ishlaydi.\n"
+        "• ⏰ <b>Yagona Dinamik Jadval:</b> Tizim vaqtlari (aniq soat yoki Namozga bog'langan), yopishqoq izohlar (Sticky Notes), Snooze (+15/+30 daq) va Dinamik eslatmalar.\n"
+        "• 🔄 <b>Eski Hardcode Migratsiyasi:</b> Statik eslatmalar bekor qilindi va interaktiv tanlov ustasi qo'shildi."
+    ),
 }
 
 COMMANDS = [
+    ("ai", "Gemini AI Suhbat"),
     ("bugun", "Bugungi reja"),
     ("talim", "Ta'lim markazi (maktab va universitet)"),
     ("universitet", "Universitet moduli (paralar, uy ishlari, BMI)"),
@@ -165,9 +174,16 @@ def load_features() -> list:
         try:
             mod = importlib.import_module(mod_name)
         except ModuleNotFoundError as e:
-            if e.name != mod_name:
+            if e.name != mod_name and name != "ai":
                 raise
+            if name == "ai":
+                app.log.warning(f"AI moduli yuklanmadi (izolyatsiya rejimi): {e}")
             continue
+        except Exception as e:
+            if name == "ai":
+                app.log.error(f"AI modulini yuklashda xatolik (bot ishlashda davom etadi): {e}")
+                continue
+            raise
         app.OPTIONAL[name] = mod
         loaded.append(mod)
     return loaded
@@ -268,14 +284,20 @@ async def amain():
     backups = db.init_db()
     if db.get_setting("epoch") is None:
         db.set_setting("epoch", app.now().replace(microsecond=0).isoformat())
-    sv.seed_standard_reminders()
+    # v4.0.1: Eski hardcode eslatmalar (sv.seed_standard_reminders) avtomatik yuklanmaydi!
     db.seed_health_data()
     db.seed_edu_data()
+    db.seed_system_schedules()
     setup()
     if "finance" in app.OPTIONAL:
         app.OPTIONAL["finance"].seed_finance_categories()
     app.scheduler.start()
     await jobs.schedule_today()
+    try:
+        from features import ai_core
+        ai_core.refresh_startup_snapshot()
+    except Exception as e:
+        app.log.warning(f"AI startup snapshot xatoligi (izolyatsiya): {e}")
     try:
         await app.bot.set_my_commands([BotCommand(command=c, description=d) for c, d in COMMANDS])
     except Exception as e:
@@ -285,6 +307,11 @@ async def amain():
     await check_startup_changelog()
     import feat_status
     await feat_status.startup_message()
+    try:
+        import feat_schedules
+        await feat_schedules.send_migration_wizard_if_needed()
+    except Exception as e:
+        app.log.warning(f"Migratsiya oynasini yuborishda xatolik: {e}")
     if "finance" in app.OPTIONAL:
         await app.OPTIONAL["finance"].startup_sync()
     await app.dp.start_polling(app.bot)

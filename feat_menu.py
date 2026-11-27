@@ -20,8 +20,8 @@ HELP = (
     "Assalomu alaykum, Umarkhan!\n\n<b>AltronBek " + app.VERSION + "</b>\n"
     "Pastdagi tugmalar orqali ishlang. Tezkor qayd uchun xabarni <code>!</code> bilan boshlang.\n"
     "Buyruqlar:\n"
-    "/bugun /chelenjlar /moliya /bozorlik /narx /maktab /qoshish /royxat /vaqt /ball /qazolar /statistika /vazn /uyqu /yotdim "
-    "/uyqu_kiritish /obhavo /balandlik /hisob /tkunlar /tugilgan /izoh /izohlar /shahar /tiklash /sozlamalar /holat /bekor"
+    "/ai /bugun /chelenjlar /moliya /bozorlik /narx /maktab /qoshish /royxat /vaqt /ball /qazolar /statistika /vazn /uyqu /yotdim "
+    "/uyqu_kiritish /obhavo /balandlik /hisob /tkunlar /tugilgan /izoh /izohlar /shahar /tiklash /sozlamalar /diagnostika /holat /bekor"
 )
 
 
@@ -58,6 +58,16 @@ async def cancel_flow(state: FSMContext):
 async def cmd_start(message: Message, state: FSMContext):
     await cancel_flow(state)
     await messenger.send(HELP, "system", common.main_kb(), deletable=False, bind_trigger=False)
+    try:
+        from features import ai_core
+        ai_core.refresh_startup_snapshot()
+    except Exception:
+        pass
+    try:
+        import feat_schedules
+        await feat_schedules.send_migration_wizard_if_needed()
+    except Exception:
+        pass
 
 
 @router.message(Command("bekor"))
@@ -114,6 +124,16 @@ async def _optional_entry(message: Message, state: FSMContext, name: str, label:
 @router.message(F.text == common.T_CHALLENGES)
 async def btn_challenges(message: Message, state: FSMContext):
     await _optional_entry(message, state, "challenges", "Chelenjlar", "3.5")
+
+
+@router.message(F.text == common.T_AI)
+async def btn_ai(message: Message, state: FSMContext):
+    await cancel_flow(state)
+    mod = app.OPTIONAL.get("ai")
+    if mod is None:
+        await messenger.send("⚠️ AI moduli hozir mavjud emas. Botning qolgan barcha bo'limlari odatdagidek ishlamoqda.", "info")
+        return
+    await mod.entry(message, state)
 
 
 @router.message(F.text == common.T_FINANCE)

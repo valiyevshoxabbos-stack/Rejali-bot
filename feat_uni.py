@@ -426,8 +426,8 @@ def delete_work(work_id: int):
 
 # ------------------------------------------------------------------ Scheduler va Eslatmalar
 
-async def schedule_today_uni():
-    """Bugungi universitet eslatmalarini rejalashtiradi."""
+async def schedule_today_uni(prayer_times: dict | None = None):
+    """Bugungi universitet eslatmalarini rejalashtiradi (vaqtlar system_schedules dan olinadi)."""
     today = app.today()
     now = app.now()
 
@@ -440,14 +440,16 @@ async def schedule_today_uni():
     if not lessons:
         return
 
-    # 1) 12:45 Sumka yig'ish eslatmasi
-    bag_dt = app.at(today, BAG_REMINDER_TIME)
-    if now < bag_dt:
+    import feat_schedules
+
+    # 1) Sumka yig'ish eslatmasi (dinamik system_schedules: uni_bag_pack)
+    bag_dt = feat_schedules.resolve_schedule_time("uni_bag_pack", today, prayer_times=prayer_times)
+    if bag_dt and now < bag_dt:
         app.schedule_job(bag_dt, send_bag_reminder, [today.isoformat()], f"uni_bag_{today}")
 
-    # 2) 13:15 Uydan chiqish eslatmasi
-    leave_dt = app.at(today, LEAVE_REMINDER_TIME)
-    if now < leave_dt:
+    # 2) Uydan chiqish eslatmasi (dinamik system_schedules: uni_leave)
+    leave_dt = feat_schedules.resolve_schedule_time("uni_leave", today, prayer_times=prayer_times)
+    if leave_dt and now < leave_dt:
         app.schedule_job(leave_dt, send_leave_reminder, [today.isoformat()], f"uni_leave_{today}")
 
     # 3) Har bir para boshlanishidan 10 daqiqa oldin eslatma
@@ -471,8 +473,11 @@ async def send_bag_reminder(date_iso: str):
     lessons = get_today_lessons(d)
     if not lessons:
         return
+    import feat_schedules
+    sched = feat_schedules.get_system_schedule("uni_bag_pack")
+    t_lbl = feat_schedules.describe_schedule(sched) if sched else BAG_REMINDER_TIME
     text = (
-        "🎒 <b>Sumkani yig'ish vaqti! (12:45)</b>\n\n"
+        f"🎒 <b>Sumkani yig'ish vaqti! ({app.esc(t_lbl)})</b>\n\n"
         "Bugungi darslaringiz uchun kerakli narsalarni, daftarlarni va topshiriqlarni sumkaga solishni unutmang.\n\n"
         "📋 <b>Bugungi paralar:</b>\n"
     )
@@ -484,7 +489,8 @@ async def send_bag_reminder(date_iso: str):
         text += f"• <b>{p_num}-para</b> ({start_t}–{end_t}): {app.esc(les['subject_name'])} ({l_type}) — 📍 {app.esc(room)}\n"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[[btn("🏛 Universitet", "uni:home")]])
-    await messenger.send(text, "reminder", kb, bind_trigger=False)
+    full_text, full_kb = feat_schedules.attach_sticky_notes("uni_bag_pack", text, kb, add_snooze=True)
+    await messenger.send(full_text, "reminder", full_kb, bind_trigger=False)
 
 
 async def send_leave_reminder(date_iso: str):
@@ -492,13 +498,17 @@ async def send_leave_reminder(date_iso: str):
     lessons = get_today_lessons(d)
     if not lessons:
         return
+    import feat_schedules
+    sched = feat_schedules.get_system_schedule("uni_leave")
+    t_lbl = feat_schedules.describe_schedule(sched) if sched else LEAVE_REMINDER_TIME
     text = (
-        "🚶‍♂️ <b>Uydan chiqish vaqti! (13:15)</b>\n\n"
+        f"🚶‍♂️ <b>Uydan chiqish vaqti! ({app.esc(t_lbl)})</b>\n\n"
         "Universitetda 1-para soat <b>13:40</b> da boshlanadi.\n"
         "Yo'lda tirbandlik bo'lishi mumkin, vaqtida yetib boring!"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[btn("🏛 Universitet", "uni:home")]])
-    await messenger.send(text, "reminder", kb, bind_trigger=False)
+    full_text, full_kb = feat_schedules.attach_sticky_notes("uni_leave", text, kb, add_snooze=True)
+    await messenger.send(full_text, "reminder", full_kb, bind_trigger=False)
 
 
 async def send_pre_para_reminder(slot_id: int, date_iso: str):

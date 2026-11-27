@@ -40,6 +40,7 @@ def btn(text: str, data: str) -> InlineKeyboardButton:
 
 def home_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [btn("⏰ Tizim vaqtlari", "sc:home"), btn("🤖 AI Sozlamalari", "ai:settings")],
         [btn("📍 Joylashuv", "se:loc"), btn("🔔 Eslatmalar", "se:rem")],
         [btn("🧹 Xabarlarni tozalash", "se:clean"), btn("😴 Uyqu", "se:sleep")],
         [btn("⚖️ Vazn", "se:weight"), btn("⏸ Pauza", "se:pause")],
@@ -115,7 +116,7 @@ def render_diagnostics() -> tuple[str, InlineKeyboardMarkup]:
         err_24h = 0
 
     lines = [
-        "🛠 <b>AltronBek Tizim Diagnostikasi (v3.9)</b>\n",
+        f"🛠 <b>AltronBek Tizim Diagnostikasi (v{app.VERSION})</b>\n",
         f"⏱ <b>Uptime:</b> {uptime_s}",
         f"💾 <b>Baza hajmi:</b> {db_size_s}",
         f"🛡 <b>Baza yaxlitligi:</b> <code>{integrity}</code>",
@@ -127,6 +128,12 @@ def render_diagnostics() -> tuple[str, InlineKeyboardMarkup]:
         f"   • ⚙️ Boshqa / Cron: {other_cnt} ta",
         f"⚠️ <b>Xatolar:</b> oxirgi 24 soatda {err_24h} ta (jami: {total_errs} ta)",
     ]
+
+    try:
+        from features import ai_router
+        lines.append(ai_router.format_ai_diagnostics_block())
+    except Exception:
+        lines.append("\n🤖 <b>Gemini AI Core:</b> izolyatsiya holatida (yuklanmagan)")
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [btn(f"⚠️ Xatolar jurnali ({total_errs} ta)", "diag:errs:0")],

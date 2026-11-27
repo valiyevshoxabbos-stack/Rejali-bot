@@ -2205,7 +2205,9 @@ async def send_morning_hygiene_reminder(attempt: int = 1):
         "3. Gigiyenik lab balzami va tartib ✨"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[btn("✅ Bajarildi", "hl:hyg_done")]])
-    await messenger.send(with_footer(text), "reminder", kb, actionable=True, bind_trigger=False)
+    import feat_schedules
+    full_text, full_kb = feat_schedules.attach_sticky_notes("morning_hygiene", with_footer(text), kb, add_snooze=True)
+    await messenger.send(full_text, "reminder", full_kb, actionable=True, bind_trigger=False)
 
     # 20 daqiqadan keyin qayta eslatish (maksimal 2 marta)
     if attempt < 3:
@@ -2315,7 +2317,6 @@ async def cb_health_week_rep(cb: CallbackQuery):
 
 
 def register_jobs(scheduler):
-    # Har tong 06:45 da tonggi gigiyena eslatmasi
-    scheduler.add_job(send_morning_hygiene_reminder, CronTrigger(hour=6, minute=45), id="morning_hygiene", replace_existing=True)
+    # morning_hygiene endi system_schedules orqali jobs.schedule_today() da dinamik boshqariladi
     # Davolanish kurslari jadvali
     schedule_course_reminders()

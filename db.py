@@ -7,10 +7,13 @@ AltronBek 3.0.1: SQLite (WAL + doimiy ulanish + tranzaksiyali migratsiya + zaxir
 - Eski 2.0 bazasi (user_version=0, lekin jadvallari bor) `.v2.bak` ga chetga olinadi.
 """
 
+import logging
 import os
 import sqlite3
 import threading
 from contextlib import contextmanager
+
+log = logging.getLogger("altronbek.db")
 
 MIGRATION_1 = """
 CREATE TABLE settings (
@@ -650,7 +653,81 @@ ALTER TABLE health_course_items ADD COLUMN linked_accessory_id INTEGER NULL REFE
 ALTER TABLE health_courses ADD COLUMN status TEXT DEFAULT 'active';
 """
 
-MIGRATIONS = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10, MIGRATION_11]
+# v12 (4.0.1): Gemini AI Core, Smart Model Router, Dinamik tizim vaqtlari, yopishqoq izohlar va dinamik eslatmalar.
+MIGRATION_12 = """
+CREATE TABLE IF NOT EXISTS system_schedules (
+    key TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'fixed',
+    time_hhmm TEXT,
+    prayer_ref TEXT,
+    offset_minutes INTEGER DEFAULT 0,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS schedule_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_key TEXT NOT NULL REFERENCES system_schedules(key),
+    note_text TEXT NOT NULL,
+    note_type TEXT NOT NULL DEFAULT 'once',
+    is_done INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_sched_notes_key ON schedule_notes(schedule_key, is_done);
+
+CREATE TABLE IF NOT EXISTS dynamic_reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'deadline',
+    start_time TEXT NOT NULL,
+    end_time TEXT,
+    days_of_week TEXT DEFAULT 'all',
+    remind_before_min INTEGER DEFAULT 0,
+    is_enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_dyn_rem_enabled ON dynamic_reminders(is_enabled);
+
+CREATE TABLE IF NOT EXISTS ai_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_model_stats (
+    model_name TEXT PRIMARY KEY,
+    tier TEXT NOT NULL,
+    success_count INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+    avg_latency_ms REAL DEFAULT 0,
+    cooldown_until TIMESTAMP,
+    last_error TEXT,
+    last_used_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS ai_chat_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_ai_chat_sess ON ai_chat_history(session_id, id);
+
+CREATE TABLE IF NOT EXISTS ai_pending_actions (
+    id TEXT PRIMARY KEY,
+    actions_json TEXT NOT NULL,
+    summary_text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_ai_pending_status ON ai_pending_actions(status);
+"""
+
+MIGRATIONS = [
+    MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6,
+    MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10, MIGRATION_11, MIGRATION_12,
+]
 LAST_MIGRATED_FROM: int | None = None
 
 REQUIRED_TABLES = (
@@ -1041,6 +1118,7 @@ def init_db() -> list[str]:
     backups = migrate()
     ensure_health_items_columns()
     seed_edu_data()
+    seed_system_schedules()
     return backups
 
 
@@ -1105,6 +1183,7 @@ def restore_from_file(src_path: str, stamp: str) -> str:
     migrate()
     ensure_health_items_columns()
     seed_edu_data()
+    seed_system_schedules()
     return safety_bak
 
 
@@ -1313,5 +1392,61 @@ def seed_edu_data():
                 "INSERT INTO edu_calendar_off_days (title, start_date, end_date, off_type) VALUES (?, ?, ?, ?)",
                 (title, s_date, e_date, o_type),
             )
+
+
+# ------------------------------------------------------------------ v4.0.1 Dinamik Jadval va AI sozlamalari
+
+SEED_SYSTEM_SCHEDULES = [
+    # (key, title, mode, time_hhmm, prayer_ref, offset_minutes, is_enabled)
+    ("morning_summary", "🌅 Tonggi xulosa", "fixed", "06:30", None, 0, 1),
+    ("morning_hygiene", "🪥 Tonggi gigiyena", "fixed", "06:45", None, 0, 1),
+    ("daily_notice", "🎂 Tug'ilgan kunlar eslatmasi", "fixed", "09:00", None, 0, 1),
+    ("finance_alerts", "💰 Moliya ogohlantirishlari (ertalab)", "fixed", "09:30", None, 0, 1),
+    ("finance_alerts_pm", "💰 Moliya ogohlantirishlari (tushdan keyin)", "fixed", "15:00", None, 0, 1),
+    ("uni_bag_pack", "🎒 Universitet: sumka yig'ish", "fixed", "12:45", None, 0, 1),
+    ("uni_leave", "🚶‍♂️ Universitet: uydan chiqish", "fixed", "13:15", None, 0, 1),
+    ("edu_evening_preview", "📚 Maktab: ertangi darslar rejasi", "fixed", "20:00", None, 0, 1),
+    ("evening_summary", "🌙 Kechki kun yakuni", "fixed", "21:45", None, 0, 1),
+]
+
+SEED_AI_SETTINGS = [
+    ("routing_mode", "auto"),
+    ("preferred_light_model", "gemini-2.5-flash-lite"),
+    ("preferred_heavy_model", "gemini-2.5-flash"),
+    ("legacy_migration_done", "0"),
+]
+
+
+def get_ai_setting(key: str, default: str | None = None) -> str | None:
+    try:
+        row = q1("SELECT value FROM ai_settings WHERE key = ?", (key,))
+        return row["value"] if row else default
+    except Exception:
+        return default
+
+
+def set_ai_setting(key: str, value: str):
+    ex(
+        "INSERT INTO ai_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, str(value)),
+    )
+
+
+def seed_system_schedules():
+    """Standart tizim vaqtlari va AI sozlamalarini bir marta (INSERT OR IGNORE) yuklaydi."""
+    tables = {r["name"] for r in q("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "system_schedules" in tables:
+        for key, title, mode, hhmm, pref, offset_m, enabled in SEED_SYSTEM_SCHEDULES:
+            ex(
+                "INSERT OR IGNORE INTO system_schedules "
+                "(key, title, mode, time_hhmm, prayer_ref, offset_minutes, is_enabled) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (key, title, mode, hhmm, pref, offset_m, enabled),
+            )
+    if "ai_settings" in tables:
+        for key, val in SEED_AI_SETTINGS:
+            ex("INSERT OR IGNORE INTO ai_settings (key, value) VALUES (?, ?)", (key, val))
+
 
 

@@ -726,7 +726,9 @@ async def send_evening_preview():
     if alerts:
         lines.append("\n" + "\n".join(alerts))
 
-    await messenger.send("\n".join(lines), "info", bind_trigger=False)
+    import feat_schedules
+    full_text, full_kb = feat_schedules.attach_sticky_notes("edu_evening_preview", "\n".join(lines), None, add_snooze=True)
+    await messenger.send(full_text, "info", full_kb, bind_trigger=False)
 
 
 async def send_pre_lesson_reminder(period: int, course_id: int):

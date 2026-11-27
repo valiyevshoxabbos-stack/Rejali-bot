@@ -154,11 +154,12 @@ async def cb_ai_pick_tier(cb: CallbackQuery):
     tier = cb.data.split(":")[2]
     await cb.answer()
     lbl = "🧠 Heavy (Murakkab tahlil)" if tier == "heavy" else "⚡ Light (Tezkor suhbat)"
-    rows = [[btn(m, f"ai:setm:{tier}:{m}")] for m in ai_router.ALL_MODELS]
+    allowed_models = ai_router.filter_allowed_models(ai_router.ALL_MODELS)
+    rows = [[btn(m, f"ai:setm:{tier}:{m}")] for m in allowed_models]
     rows.append([btn("⬅️ AI Sozlamalari", "ai:settings")])
     await _safe_edit(
         cb.message,
-        f"<b>{lbl}</b> uchun asosiy modelni tanlang:",
+        f"<b>{lbl}</b> uchun asosiy modelni tanlang (faqat Gemini &gt; 3):",
         InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
@@ -167,7 +168,9 @@ async def cb_ai_pick_tier(cb: CallbackQuery):
 async def cb_ai_set_model(cb: CallbackQuery):
     parts = cb.data.split(":", 3)
     tier, model_name = parts[2], parts[3]
-    ai_router.set_preferred_model(tier, model_name)
+    if not ai_router.set_preferred_model(tier, model_name):
+        await cb.answer("Faqat 3-avloddan katta (> 3) Gemini modellari ruxsat etiladi!", show_alert=True)
+        return
     await cb.answer(f"Tanlandi: {model_name}")
     text, kb = render_ai_settings()
     await _safe_edit(cb.message, text, kb)
@@ -175,8 +178,8 @@ async def cb_ai_set_model(cb: CallbackQuery):
 
 @router.callback_query(F.data == "ai:clearcd")
 async def cb_ai_clear_cooldown(cb: CallbackQuery):
-    ai_router.clear_all_cooldowns()
-    await cb.answer("Cooldownlar tozalandi!")
+    ai_router.refresh_models(clear_cooldowns=True)
+    await cb.answer("Cooldownlar tozalandi va > 3 modellar yangilandi!")
     text, kb = render_ai_settings()
     await _safe_edit(cb.message, text, kb)
 

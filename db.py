@@ -1411,8 +1411,8 @@ SEED_SYSTEM_SCHEDULES = [
 
 SEED_AI_SETTINGS = [
     ("routing_mode", "auto"),
-    ("preferred_light_model", "gemini-2.5-flash-lite"),
-    ("preferred_heavy_model", "gemini-2.5-flash"),
+    ("preferred_light_model", "gemini-3.5-flash-lite"),
+    ("preferred_heavy_model", "gemini-3.8-flash"),
     ("legacy_migration_done", "0"),
 ]
 

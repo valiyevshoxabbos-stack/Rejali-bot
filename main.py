@@ -311,6 +311,9 @@ async def amain():
         ai_init = feat_ai_router.verify_ai_client_init()
         if not ai_init["ok"]:
             app.log.warning(f"AI Core izolyatsiya holatida: {ai_init['reason']}")
+            feat_ai_router.initialize_router(refresh_remote=False)
+        else:
+            await feat_ai_router.async_initialize_router(refresh_remote=True)
         feat_ai_core.refresh_startup_snapshot()
     except Exception as e:
         app.log.error(f"AI startup init/snapshot xatoligi (izolyatsiya): {e}")

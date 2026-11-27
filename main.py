@@ -173,15 +173,27 @@ def load_features() -> list:
         mod_name = f"feat_{name}"
         try:
             mod = importlib.import_module(mod_name)
+            if name == "ai":
+                app.AI_LOAD_ERROR = None
         except ModuleNotFoundError as e:
             if e.name != mod_name and name != "ai":
                 raise
             if name == "ai":
-                app.log.warning(f"AI moduli yuklanmadi (izolyatsiya rejimi): {e}")
+                app.AI_LOAD_ERROR = f"ModuleNotFoundError: {e}"
+                app.log.error(f"AI moduli yuklanmadi (izolyatsiya rejimi): {e}")
+                try:
+                    db.log_error("AILoadError", str(e), traceback.format_exc(), "main.load_features")
+                except Exception:
+                    pass
             continue
         except Exception as e:
             if name == "ai":
+                app.AI_LOAD_ERROR = f"{type(e).__name__}: {e}"
                 app.log.error(f"AI modulini yuklashda xatolik (bot ishlashda davom etadi): {e}")
+                try:
+                    db.log_error("AILoadError", str(e), traceback.format_exc(), "main.load_features")
+                except Exception:
+                    pass
                 continue
             raise
         app.OPTIONAL[name] = mod
@@ -294,10 +306,15 @@ async def amain():
     app.scheduler.start()
     await jobs.schedule_today()
     try:
-        from features import ai_core
-        ai_core.refresh_startup_snapshot()
+        import feat_ai_core
+        import feat_ai_router
+        ai_init = feat_ai_router.verify_ai_client_init()
+        if not ai_init["ok"]:
+            app.log.warning(f"AI Core izolyatsiya holatida: {ai_init['reason']}")
+        feat_ai_core.refresh_startup_snapshot()
     except Exception as e:
-        app.log.warning(f"AI startup snapshot xatoligi (izolyatsiya): {e}")
+        app.log.error(f"AI startup init/snapshot xatoligi (izolyatsiya): {e}")
+        db.log_error("AIStartupError", str(e), traceback.format_exc(), "main.amain")
     try:
         await app.bot.set_my_commands([BotCommand(command=c, description=d) for c, d in COMMANDS])
     except Exception as e:

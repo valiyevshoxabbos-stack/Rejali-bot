@@ -59,8 +59,8 @@ async def cmd_start(message: Message, state: FSMContext):
     await cancel_flow(state)
     await messenger.send(HELP, "system", common.main_kb(), deletable=False, bind_trigger=False)
     try:
-        from features import ai_core
-        ai_core.refresh_startup_snapshot()
+        import feat_ai_core
+        feat_ai_core.refresh_startup_snapshot()
     except Exception:
         pass
     try:
@@ -131,7 +131,12 @@ async def btn_ai(message: Message, state: FSMContext):
     await cancel_flow(state)
     mod = app.OPTIONAL.get("ai")
     if mod is None:
-        await messenger.send("⚠️ AI moduli hozir mavjud emas. Botning qolgan barcha bo'limlari odatdagidek ishlamoqda.", "info")
+        reason = f"\nSabab: <code>{app.esc(app.AI_LOAD_ERROR)}</code>" if app.AI_LOAD_ERROR else ""
+        await messenger.send(
+            f"⚠️ AI moduli hozir mavjud emas.{reason}\n"
+            "Batafsil ma'lumot: /diagnostika. Botning qolgan barcha bo'limlari odatdagidek ishlamoqda.",
+            "info",
+        )
         return
     await mod.entry(message, state)
 

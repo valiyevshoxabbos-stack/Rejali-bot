@@ -27,13 +27,47 @@ COUNTRY = os.environ.get("COUNTRY", "Uzbekistan")
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Tashkent"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
+# AI moduli yuklanishda xato bersa, aniq sababi shu yerda saqlanadi (/diagnostika uchun).
+AI_LOAD_ERROR: str | None = None
+
+
+def _clean_secret(val: str | None) -> str:
+    if not val:
+        return ""
+    s = val.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1].strip()
+    return s
+
 
 def get_gemini_api_key() -> str:
-    """GEMINI_API_KEY muhit o'zgaruvchisini xavfsiz o'qiydi (bo'sh bo'lsa '' qaytaradi)."""
+    """
+    GEMINI_API_KEY (yoki zaxira GOOGLE_API_KEY) muhit o'zgaruvchisini xavfsiz o'qiydi.
+    Prefiks bo'yicha cheklov yo'q: `AIza...`, `AQ....` va barcha Google Auth kalitlari qabul qilinadi.
+    Bo'sh bo'lsa '' qaytaradi.
+    """
     env_val = os.getenv("GEMINI_API_KEY")
     if env_val is not None:
-        return env_val.strip()
-    return GEMINI_API_KEY
+        cleaned = _clean_secret(env_val)
+        if cleaned:
+            return cleaned
+        # Agar GEMINI_API_KEY ataylab bo'sh qilingan bo'lsa, GOOGLE_API_KEY dan ham tekshirib ko'ramiz
+        fallback_google = _clean_secret(os.getenv("GOOGLE_API_KEY"))
+        return fallback_google
+    fallback = _clean_secret(os.getenv("GOOGLE_API_KEY"))
+    if fallback:
+        return fallback
+    return _clean_secret(GEMINI_API_KEY)
+
+
+def mask_api_key(key: str) -> str:
+    """API kalitni log va /diagnostika da xavfsiz maskalangan ko'rinishda qaytaradi."""
+    k = _clean_secret(key)
+    if not k:
+        return ""
+    if len(k) <= 10:
+        return k[:3] + "..."
+    return f"{k[:6]}...{k[-4:]}"
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)

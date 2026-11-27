@@ -1,9 +1,9 @@
 """
 AltronBek 4.0.1: AI Suhbat moduli uchun izolyatsiyalangan ulanish nuqtasi.
-`features/ai_chat.py` dan router va kirish nuqtalarini eksport qiladi.
+Yassi tuzilmada to'g'ridan-to'g'ri `feat_ai_chat` dan eksport qiladi (`features/` papkasisiz ham ishlaydi).
 """
 
-from features.ai_chat import (  # noqa: F401
+from feat_ai_chat import (  # noqa: F401
     AIChatState,
     entry,
     register_jobs,

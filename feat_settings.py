@@ -130,10 +130,16 @@ def render_diagnostics() -> tuple[str, InlineKeyboardMarkup]:
     ]
 
     try:
-        from features import ai_router
-        lines.append(ai_router.format_ai_diagnostics_block())
-    except Exception:
-        lines.append("\n🤖 <b>Gemini AI Core:</b> izolyatsiya holatida (yuklanmagan)")
+        import feat_ai_router as _ai_router
+        lines.append(_ai_router.format_ai_diagnostics_block())
+    except Exception as ai_exc:
+        reason = app.AI_LOAD_ERROR or f"{type(ai_exc).__name__}: {ai_exc}"
+        app.log.error(f"/diagnostika AI modulini o'qishda xatolik: {reason}")
+        db.log_error("AIDiagnosticsError", reason, "", "feat_settings.render_diagnostics")
+        lines.append(
+            "\n🤖 <b>Gemini AI Core:</b> izolyatsiya holatida (yuklanmagan)\n"
+            f"• ⚠️ <b>Sabab:</b> <code>{app.esc(reason[:220])}</code>"
+        )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [btn(f"⚠️ Xatolar jurnali ({total_errs} ta)", "diag:errs:0")],

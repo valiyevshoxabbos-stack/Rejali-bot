@@ -3,11 +3,12 @@ AltronBek 4.0.1: Gemini AI Core — Tizim Pasporti (Startup Snapshot),
 Multimodal Ovozli Xabarlar, Function Calling Tsikli va Xavfsizlik Qatlami.
 """
 
+import inspect
 import json
 import re
 import traceback
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 import app
 import db
@@ -252,25 +253,38 @@ def _build_contents(history: list[dict], user_text: str | None, audio_bytes: byt
     return contents
 
 
-def _execute_tool_call(name: str, args: dict) -> tuple[dict, dict | None]:
+def _execute_tool_call(name: str, args: dict | None, user_text: str | None = None) -> tuple[dict, dict | None]:
     """
-    Bitta Gemini tool chaqiruvini bajaradi.
+    Bitta Gemini tool chaqiruvini xavfsiz bajaradi.
     Returns: (tool_result_dict, pending_action_if_proposed)
     """
+    safe_args = args if isinstance(args, dict) else {}
     if name in ai_tools.READ_ONLY_TOOLS:
         fn = ai_tools.READ_ONLY_TOOLS[name]
         try:
-            res = fn(**(args or {}))
+            res = fn(**safe_args)
         except TypeError:
-            res = fn()
+            try:
+                res = fn()
+            except Exception as exc:
+                return {"ok": False, "error": f"{name} xatoligi: {exc}"}, None
+        except Exception as exc:
+            return {"ok": False, "error": f"{name} xatoligi: {exc}"}, None
         return {"ok": True, "data": res}, None
 
     if name == "propose_actions":
-        summary_text = str((args or {}).get("summary_text") or "")
-        actions = (args or {}).get("actions") or []
-        res = ai_tools.propose_actions(summary_text, actions)
+        summary_text = str(safe_args.get("summary_text") or "")
+        actions = safe_args.get("actions") or []
+        res = ai_tools.propose_actions(summary_text, actions, user_text=user_text)
         if "pending_action_id" in res:
             return {"ok": True, "data": res}, res
+        if res.get("needs_clarification"):
+            return {
+                "ok": False,
+                "needs_clarification": True,
+                "clarification_question": res.get("clarification_question") or res.get("error", "Aniqlashtirish kerak."),
+                "error": res.get("error", "Aniqlashtirish kerak."),
+            }, None
         return {"ok": False, "error": res.get("error", "Xatolik")}, None
 
     return {"ok": False, "error": f"Noma'lum asbob: {name}"}, None
@@ -282,6 +296,7 @@ async def process_user_turn(
     audio_mime: str = "audio/ogg",
     session_id: str | None = None,
     router_instance: ai_router.SmartModelRouter | None = None,
+    on_progress: Callable[[str], Any] | None = None,
 ) -> dict:
     """
     Foydalanuvchi matnli yoki ovozli so'rovini Gemini AI Core orqali qayta ishlaydi.
@@ -308,6 +323,16 @@ async def process_user_turn(
             "session_id": sid,
         }
 
+    async def _notify(stage: str):
+        if on_progress is None:
+            return
+        try:
+            maybe = on_progress(stage)
+            if inspect.isawaitable(maybe):
+                await maybe
+        except Exception:
+            pass
+
     router = router_instance or ai_router.SmartModelRouter()
     tier = select_tier(clean_text, has_audio=bool(audio_bytes))
     history = get_recent_history(sid, limit=HISTORY_WINDOW)
@@ -322,7 +347,8 @@ async def process_user_turn(
     reply_text = ""
 
     try:
-        for _ in range(MAX_TOOL_ROUNDS):
+        for round_idx in range(MAX_TOOL_ROUNDS):
+            await _notify("thinking" if round_idx == 0 else "finalizing")
             resp, used_model, lat_ms = await router.generate_content(contents=contents, tier=tier, config=config)
             total_latency += lat_ms
             fcalls = _extract_function_calls(resp)
@@ -331,13 +357,17 @@ async def process_user_turn(
                 break
 
             tool_results_parts = []
+            clarification_text: str | None = None
             for fc in fcalls:
                 tname = fc["name"]
                 targs = fc["args"]
                 used_tools.add(tname)
-                t_res, pending_info = _execute_tool_call(tname, targs)
+                await _notify(f"tool:{tname}")
+                t_res, pending_info = _execute_tool_call(tname, targs, user_text=clean_text)
                 if pending_info:
                     proposed_action = pending_info
+                elif t_res.get("needs_clarification") and not clarification_text:
+                    clarification_text = str(t_res.get("clarification_question") or t_res.get("error") or "").strip()
                 tool_results_parts.append({
                     "function_response": {
                         "name": tname,
@@ -349,6 +379,11 @@ async def process_user_turn(
             if proposed_action is not None:
                 model_text = _extract_text(resp)
                 reply_text = model_text or proposed_action["summary_text"]
+                break
+
+            # Agar majburiy argument yetishmasa yoki hisob/jadval noaniq bo'lsa — taxmin qilmaymiz, darhol aniqlashtiramiz!
+            if clarification_text:
+                reply_text = f"❓ {clarification_text}"
                 break
 
             contents.append({"role": "model", "parts": [{"text": f"[Asboblar chaqirildi: {', '.join(fc['name'] for fc in fcalls)}]"}]})

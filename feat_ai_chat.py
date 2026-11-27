@@ -3,6 +3,7 @@ AltronBek 4.0.1: 🤖 AI Suhbat bo'limi, Multimodal Ovozli Xabarlar,
 Human-in-the-Loop Tasdiqlash Kartochkalari va ⚙️ AI Sozlamalari.
 """
 
+import asyncio
 import io
 import traceback
 
@@ -211,9 +212,189 @@ async def cb_ai_cancel_action(cb: CallbackQuery):
         await cb.answer("Bu amal allaqachon yakunlangan.", show_alert=True)
 
 
-# ------------------------------------------------------------------ Turn Execution Helper
+# ------------------------------------------------------------------ Progress Animation & Turn Execution Helper
 
-async def _send_ai_result(res: dict):
+PROGRESS_INTERVAL_SEC = 0.75
+_PROGRESS_ICONS = ("⏳", "🔄", "✨")
+_PROGRESS_DOTS = (".", "..", "...")
+
+_STAGE_LABELS: dict[str, str] = {
+    "voice": "🎤 Ovozli xabar yuklanmoqda",
+    "thinking": "🤖 AI o'ylamoqda",
+    "finalizing": "🧠 Javob shakllantirilmoqda",
+    "tool:get_finance_summary": "💰 Moliya ma'lumotlari tekshirilmoqda",
+    "tool:get_market_info": "🛒 Bozorlik ma'lumotlari tekshirilmoqda",
+    "tool:get_school_schedule": "🏫 Maktab jadvali tekshirilmoqda",
+    "tool:get_uni_schedule": "🏛 Universitet jadvali tekshirilmoqda",
+    "tool:get_health_status": "💊 Salomatlik ma'lumotlari tekshirilmoqda",
+    "tool:get_challenges_status": "🏆 Chelenjlar tekshirilmoqda",
+    "tool:get_daily_status": "📋 Kunlik holat tekshirilmoqda",
+    "tool:get_schedules_and_reminders": "⏰ Jadvallar va eslatmalar tekshirilmoqda",
+    "tool:propose_actions": "📝 Amal tekshirilmoqda",
+}
+
+
+def _stage_label(stage: str) -> str:
+    if stage in _STAGE_LABELS:
+        return _STAGE_LABELS[stage]
+    if stage.startswith("tool:"):
+        return "⚙️ Asbob bajarilmoqda"
+    return "🤖 AI ishlamoqda"
+
+
+class _AIProgressAnimator:
+    """
+    AI so'rovini qayta ishlash va tool chaqiruvlari davomida bitta xabarni `edit_text`
+    orqali yangilab turuvchi jarayon animatsiyasi.
+    `"message is not modified"` xatosi e'tiborsiz qoldiriladi.
+    """
+
+    def __init__(self, interval_sec: float | None = None):
+        self.interval_sec = PROGRESS_INTERVAL_SEC if interval_sec is None else float(interval_sec)
+        self.message: Message | None = None
+        self._stage = "thinking"
+        self._frame = 0
+        self._last_text = ""
+        self._stopped = False
+        self._task: asyncio.Task | None = None
+        self._lock = asyncio.Lock()
+
+    def _format_frame(self) -> str:
+        icon = _PROGRESS_ICONS[self._frame % len(_PROGRESS_ICONS)]
+        dots = _PROGRESS_DOTS[self._frame % len(_PROGRESS_DOTS)]
+        label = _stage_label(self._stage)
+        return f"{icon} <i>{label}{dots}</i>"
+
+    async def start(self, initial_stage: str = "thinking"):
+        self._stage = initial_stage
+        self._frame = 0
+        self._stopped = False
+        initial_text = self._format_frame()
+        self._last_text = initial_text
+        self.message = await messenger.send(
+            initial_text,
+            "info",
+            kb=None,
+            actionable=False,
+            deletable=False,
+            bind_trigger=False,
+        )
+        if self.message is not None and self.interval_sec > 0:
+            self._task = asyncio.create_task(self._tick_loop())
+
+    async def _do_edit_text(self, text: str, reply_markup: InlineKeyboardMarkup | None = None):
+        if self.message is None:
+            return
+        if getattr(self.message, "bot", None) is not None:
+            await self.message.edit_text(text, reply_markup=reply_markup)
+        else:
+            await app.bot.edit_message_text(
+                text,
+                chat_id=app.CHAT_ID,
+                message_id=self.message.message_id,
+                reply_markup=reply_markup,
+            )
+
+    async def _edit_progress(self, text: str):
+        if self.message is None or self._stopped:
+            return
+        try:
+            await self._do_edit_text(text)
+            self._last_text = text
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            app.log.debug(f"AI progress edit_text e'tiborsiz qoldirildi: {exc}")
+        except Exception as exc:
+            app.log.debug(f"AI progress edit xatoligi: {exc}")
+
+    async def _tick_loop(self):
+        try:
+            while not self._stopped:
+                await asyncio.sleep(self.interval_sec)
+                async with self._lock:
+                    if self._stopped or self.message is None:
+                        return
+                    self._frame += 1
+                    await self._edit_progress(self._format_frame())
+        except asyncio.CancelledError:
+            return
+
+    async def on_progress(self, stage: str):
+        async with self._lock:
+            if self._stopped or self.message is None:
+                return
+            self._stage = stage
+            self._frame += 1
+            await self._edit_progress(self._format_frame())
+
+    async def stop(self):
+        if self._stopped:
+            return
+        self._stopped = True
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            self._task = None
+        async with self._lock:
+            pass
+
+    async def replace_with_final(
+        self,
+        text: str,
+        kb: InlineKeyboardMarkup | None,
+        *,
+        actionable: bool = False,
+        fallback_text: str | None = None,
+    ):
+        await self.stop()
+        markup = kb if actionable else messenger.with_delete(kb)
+        if self.message is not None:
+            final_saved = text
+            try:
+                await self._do_edit_text(text, reply_markup=markup)
+            except TelegramBadRequest as exc:
+                if "message is not modified" not in str(exc).lower():
+                    if fallback_text is not None:
+                        try:
+                            await self._do_edit_text(fallback_text, reply_markup=markup)
+                            final_saved = fallback_text
+                        except TelegramBadRequest as exc2:
+                            if "message is not modified" not in str(exc2).lower():
+                                await messenger.send(fallback_text, "info", kb, actionable=actionable, bind_trigger=False)
+                                return
+                        except Exception:
+                            await messenger.send(fallback_text, "info", kb, actionable=actionable, bind_trigger=False)
+                            return
+                    else:
+                        await messenger.send(text, "info", kb, actionable=actionable, bind_trigger=False)
+                        return
+            except Exception:
+                target = fallback_text if fallback_text is not None else text
+                await messenger.send(target, "info", kb, actionable=actionable, bind_trigger=False)
+                return
+
+            try:
+                db.ex(
+                    "UPDATE msg_log SET category = 'info', actionable = ?, text = ? "
+                    "WHERE message_id = ? AND deleted_at IS NULL",
+                    (int(actionable), final_saved, self.message.message_id),
+                )
+            except Exception:
+                pass
+            return
+
+        sent = await messenger.send(text, "info", kb, actionable=actionable, bind_trigger=False)
+        if sent is None and fallback_text is not None:
+            await messenger.send(fallback_text, "info", kb, actionable=actionable, bind_trigger=False)
+
+
+async def _send_ai_result(res: dict, animator: _AIProgressAnimator | None = None):
     pending = res.get("pending_action")
     if pending:
         aid = pending["pending_action_id"]
@@ -223,7 +404,10 @@ async def _send_ai_result(res: dict):
             f"{app.esc(summary_s)}\n\n"
             "<i>Tasdiqlasangizgina baza/jadvalga yoziladi:</i>"
         )
-        await messenger.send(card, "info", pending_action_kb(aid), actionable=True, bind_trigger=False)
+        if animator is not None:
+            await animator.replace_with_final(card, pending_action_kb(aid), actionable=True)
+        else:
+            await messenger.send(card, "info", pending_action_kb(aid), actionable=True, bind_trigger=False)
         return
 
     reply = res.get("reply_text") or "Javob olinmadi."
@@ -231,10 +415,16 @@ async def _send_ai_result(res: dict):
     model_footer = ""
     if res.get("ok") and res.get("model_used"):
         model_footer = f"\n\n<i>🤖 {app.esc(res['model_used'])} · {int(round(res.get('latency_ms', 0)))} ms</i>"
-    sent = await messenger.send(reply + model_footer, "info", chat_controls_kb(), bind_trigger=False)
+    full_text = reply + model_footer
+    safe_fallback = app.esc(reply) + model_footer
+    if animator is not None:
+        await animator.replace_with_final(full_text, chat_controls_kb(), actionable=False, fallback_text=safe_fallback)
+        return
+
+    sent = await messenger.send(full_text, "info", chat_controls_kb(), bind_trigger=False)
     if sent is None:
         # Agar HTML parse xatosi bo'lsa, escape qilib qayta yuboramiz
-        await messenger.send(app.esc(reply) + model_footer, "info", chat_controls_kb(), bind_trigger=False)
+        await messenger.send(safe_fallback, "info", chat_controls_kb(), bind_trigger=False)
 
 
 # ------------------------------------------------------------------ Text & Voice Handlers
@@ -247,8 +437,16 @@ async def _send_ai_result(res: dict):
     ~F.text.in_(common.MENU_TEXTS),
 )
 async def msg_ai_chat_text(message: Message, state: FSMContext):
-    res = await ai_core.process_user_turn(user_text=message.text)
-    await _send_ai_result(res)
+    animator = _AIProgressAnimator()
+    await animator.start("thinking")
+    try:
+        res = await ai_core.process_user_turn(
+            user_text=message.text,
+            on_progress=animator.on_progress,
+        )
+    finally:
+        await animator.stop()
+    await _send_ai_result(res, animator=animator)
 
 
 async def _download_voice_bytes(message: Message) -> tuple[bytes | None, str]:
@@ -269,16 +467,26 @@ async def _download_voice_bytes(message: Message) -> tuple[bytes | None, str]:
 
 @router.message(StateFilter(AIChatState.active, default_state), F.voice)
 async def msg_ai_voice(message: Message, state: FSMContext):
-    audio_bytes, mime = await _download_voice_bytes(message)
-    if not audio_bytes:
-        await messenger.send("⚠️ Ovozli xabarni yuklab bo'lmadi. Iltimos, qayta yuboring yoki matn yozing.", "info", bind_trigger=False)
-        return
-    res = await ai_core.process_user_turn(
-        user_text=message.caption or None,
-        audio_bytes=audio_bytes,
-        audio_mime=mime,
-    )
-    await _send_ai_result(res)
+    animator = _AIProgressAnimator()
+    await animator.start("voice")
+    try:
+        audio_bytes, mime = await _download_voice_bytes(message)
+        if not audio_bytes:
+            await animator.replace_with_final(
+                "⚠️ Ovozli xabarni yuklab bo'lmadi. Iltimos, qayta yuboring yoki matn yozing.",
+                None,
+                actionable=False,
+            )
+            return
+        res = await ai_core.process_user_turn(
+            user_text=message.caption or None,
+            audio_bytes=audio_bytes,
+            audio_mime=mime,
+            on_progress=animator.on_progress,
+        )
+    finally:
+        await animator.stop()
+    await _send_ai_result(res, animator=animator)
 
 
 def register_jobs(scheduler):

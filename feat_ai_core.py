@@ -29,7 +29,14 @@ MEDICAL_KEYWORDS = (
     "dori", "aptechka", "dorixona", "isitma", "og'riq", "ogriq", "shamollash",
     "yo'tal", "yotal", "bosh og", "oshqozon", "allergiya", "tabletka", "sirop",
     "shifokor", "kasallik", "davolanish", "paratsetamol", "ibuprofen", "tashxis",
-    "salomatlik", "harorat", "bosim", "qon",
+    "salomatlik", "harorat", "bosim", "qon", "tyubik", "flakon", "maz", "krem",
+    "gel", "sprey", "tomchi", "kapsula", "ampula", "retsept",
+)
+
+RECEIPT_KEYWORDS = (
+    "jami", "itogo", "total", "chek", "xarid", "to'lov", "tolov", "so'm", "som",
+    "uzs", "summa", "narx", "do'kon", "dokon", "market", "supermarket",
+    "korzinka", "havas", "makro", "dorixona", "apteka",
 )
 
 
@@ -143,11 +150,120 @@ def refresh_startup_snapshot() -> str:
     return passport
 
 
-def _needs_medical_disclaimer(user_text: str, reply_text: str, used_tools: set[str]) -> bool:
+def _needs_medical_disclaimer(
+    user_text: str,
+    reply_text: str,
+    used_tools: set[str],
+    pending_action: dict | None = None,
+) -> bool:
     if "get_health_status" in used_tools:
+        return True
+    if pending_action and pending_action.get("has_health_action"):
         return True
     combined = f"{user_text or ''} {reply_text or ''}".lower()
     return any(kw in combined for kw in MEDICAL_KEYWORDS)
+
+
+def extract_ocr_receipt_hint(reply_text: str, user_text: str = "") -> dict | None:
+    """
+    OCR rasm tahlili natijasidan xarid/chiqim cheki ekanligini, umumiy summani va
+    aniqlangan mahsulot qatorlarini xavfsiz ajratib oladi (balansdan HECH QACHON avtomatik yechmaydi!).
+    """
+    txt = (reply_text or "").strip()
+    if not txt:
+        return None
+    low = f"{txt} {user_text or ''}".lower()
+    if not any(kw in low for kw in RECEIPT_KEYWORDS):
+        return None
+
+    # 1) Mahsulot qatorlarini ajratish (`- Olma 2 kg — 24 000 so'm`, `1. Non: 8 000 so'm`)
+    items: list[dict] = []
+    total_amount = 0
+    store_name = ""
+
+    for raw_line in txt.splitlines():
+        line = re.sub(r"<[^>]+>", "", raw_line).strip()
+        if not line:
+            continue
+        line_low = line.lower()
+
+        if not store_name:
+            sm = re.match(r"^(?:do['ʻ’]?kon|dorixona|joy|manzil|market)\s*[:\-—]\s*(.+)$", line, re.IGNORECASE)
+            if sm:
+                store_name = sm.group(1).strip().strip("*_")
+                continue
+
+        # Jami summa qatori
+        if any(k in line_low for k in ("jami", "itogo", "total", "umumiy", "to'lov", "tolov")):
+            nums = re.findall(r"\d[\d\s.,]*\s*(?:ming|mln)?", line, re.IGNORECASE)
+            for cand in reversed(nums):
+                try:
+                    val = ai_tools._normalize_amount(cand)
+                    if val >= 100:
+                        total_amount = val
+                        break
+                except ValueError:
+                    continue
+            continue
+
+        # Mahsulot qatori
+        im = re.match(
+            r"^(?:[-•*]|\d+[.)])\s*(?P<name>[^:\-—\n]+?)\s*(?:[:\-—=]+|\s+)\s*(?P<price>\d[\d\s.,]*(?:\s*(?:ming|mln))?)\s*(?:so['ʻ’]?m|som|uzs)\b",
+            line,
+            re.IGNORECASE,
+        )
+        if im:
+            raw_name = im.group("name").strip().strip("*_")
+            try:
+                price_v = ai_tools._normalize_amount(im.group("price"))
+            except ValueError:
+                price_v = 0
+            if raw_name and price_v > 0:
+                qty = 1.0
+                unit = "dona"
+                qm = re.search(r"(\d+(?:[.,]\d+)?)\s*(kg|g|dona|litr|l|metr|tyubik|flakon|tabletka|kapsula)\b", raw_name, re.IGNORECASE)
+                if qm:
+                    qty = float(qm.group(1).replace(",", "."))
+                    unit = qm.group(2).lower()
+                    raw_name = (raw_name[:qm.start()] + raw_name[qm.end():]).strip(" (),.-")
+                if raw_name:
+                    items.append({
+                        "item_name": raw_name,
+                        "quantity": qty if qty > 0 else 1.0,
+                        "unit": unit,
+                        "total_price": price_v,
+                    })
+
+    if total_amount <= 0 and items:
+        total_amount = sum(int(it["total_price"]) for it in items)
+
+    # Agar hali ham summa topilmasa, matndagi `so'm` oldidagi eng katta raqamni olamiz
+    if total_amount <= 0:
+        som_nums = re.findall(r"(\d[\d\s.,]*(?:\s*(?:ming|mln))?)\s*(?:so['ʻ’]?m|som|uzs)\b", txt, re.IGNORECASE)
+        parsed = []
+        for s_n in som_nums:
+            try:
+                v = ai_tools._normalize_amount(s_n)
+                if v >= 100:
+                    parsed.append(v)
+            except ValueError:
+                pass
+        if parsed:
+            total_amount = max(parsed)
+
+    if total_amount <= 0 and not items:
+        return None
+
+    is_pharmacy = any(
+        kw in low for kw in ("dorixona", "apteka", "aptechka", "tabletka", "sirop", "tyubik", "flakon", "dori", "paratsetamol", "ibuprofen")
+    )
+    return {
+        "total_amount": int(total_amount),
+        "items": items,
+        "is_pharmacy": is_pharmacy,
+        "store_name": store_name,
+        "summary": txt[:500],
+    }
 
 
 def _extract_function_calls(resp: Any) -> list[dict]:
@@ -225,26 +341,52 @@ def _build_gemini_config(system_instruction: str) -> Any:
         }
 
 
-def _make_audio_part(audio_bytes: bytes, audio_mime: str) -> Any:
+def _make_media_part(media_bytes: bytes, media_mime: str) -> Any:
     try:
         from google.genai import types
-        return types.Part.from_bytes(data=audio_bytes, mime_type=audio_mime)
+        return types.Part.from_bytes(data=media_bytes, mime_type=media_mime)
     except Exception:
-        return {"mime_type": audio_mime, "data": audio_bytes}
+        return {"mime_type": media_mime, "data": media_bytes}
 
 
-def _build_contents(history: list[dict], user_text: str | None, audio_bytes: bytes | None, audio_mime: str) -> list[dict]:
+def _make_audio_part(audio_bytes: bytes, audio_mime: str) -> Any:
+    return _make_media_part(audio_bytes, audio_mime)
+
+
+def _build_contents(
+    history: list[dict],
+    user_text: str | None,
+    audio_bytes: bytes | None,
+    audio_mime: str,
+    image_bytes: bytes | None = None,
+    image_mime: str = "image/jpeg",
+) -> list[dict]:
     contents: list[dict] = []
     for h in history:
         contents.append({"role": h["role"], "parts": [{"text": h["content"]}]})
     cur_parts: list[Any] = []
-    if audio_bytes:
-        cur_parts.append(_make_audio_part(audio_bytes, audio_mime))
+    if image_bytes:
+        cur_parts.append(_make_media_part(image_bytes, image_mime))
+        caption_s = (user_text or "").strip()
+        ocr_prompt = (
+            "Foydalanuvchi rasm/chek yubordi (OCR tahlil). Rasm ichidagi matn, do'kon/dorixona nomi, "
+            "mahsulotlar/xizmatlar (miqdori va qator narxi bilan) hamda Jami summani aniq o'qi va o'zbek tilida qisqa, tushunarli ro'yxat qilib chiqar.\n"
+            "QAT'IY QOIDA: Balansdan o'zboshimchalik bilan yechma! "
+            "Agar izohda aniq hisob (masalan 'Naqd' yoki karta raqami) ko'rsatilgan bo'lsa `propose_actions` chaqir, "
+            "aks holda faqat o'qilgan natijani chiqarib, foydalanuvchidan qaysi hisobdan moliya chiqimi yoki bozorlik/dorixonaga yozishni so'ra."
+        )
+        if caption_s:
+            ocr_prompt = f"Foydalanuvchi izohi: {caption_s}\n\n{ocr_prompt}"
+        cur_parts.append({"text": ocr_prompt})
+    elif audio_bytes:
+        cur_parts.append(_make_media_part(audio_bytes, audio_mime))
         cur_parts.append({
             "text": (
                 user_text.strip() if user_text else
-                "Foydalanuvchi ovozli xabar yubordi. Uni diqqat bilan tingla, tushun va vazifani bajar. "
-                "Agar audio noaniq yoki muhim detal yetishmasa, taxmin qilma — qisqa aniqlashtiruvchi savol ber."
+                "Foydalanuvchi ovozli xabar yubordi. Uni diqqat bilan tingla, tushun va vazifani bajar "
+                "(bozorlik, dorixona, moliya, jadval/eslatma yoki oddiy suhbat bo'lishi mumkin). "
+                "Agar audio noaniq eshitilsa yoki muhim detal (hisob: Naqd/karta, summa, vaqt) yetishmasa, "
+                "taxmin qilma — `propose_actions` chaqirmasdan qisqa aniqlashtiruvchi savol ber."
             )
         })
     else:
@@ -294,18 +436,22 @@ async def process_user_turn(
     user_text: str | None = None,
     audio_bytes: bytes | None = None,
     audio_mime: str = "audio/ogg",
+    image_bytes: bytes | None = None,
+    image_mime: str = "image/jpeg",
     session_id: str | None = None,
     router_instance: ai_router.SmartModelRouter | None = None,
     on_progress: Callable[[str], Any] | None = None,
 ) -> dict:
     """
-    Foydalanuvchi matnli yoki ovozli so'rovini Gemini AI Core orqali qayta ishlaydi.
+    Foydalanuvchi matnli, ovozli yoki rasm/chek (OCR) so'rovini Gemini AI Core orqali qayta ishlaydi.
     HECH QACHON boshqarilmagan exception chiqarmaydi (Full Isolation).
     Returns:
         {
             "ok": bool,
             "reply_text": str,
             "pending_action": dict | None,
+            "ocr_receipt": dict | None,
+            "has_health_context": bool,
             "model_used": str | None,
             "latency_ms": float,
             "session_id": str,
@@ -313,11 +459,13 @@ async def process_user_turn(
     """
     sid = session_id or get_or_create_session_id()
     clean_text = (user_text or "").strip()
-    if not clean_text and not audio_bytes:
+    if not clean_text and not audio_bytes and not image_bytes:
         return {
             "ok": False,
-            "reply_text": "Matn yoki ovozli xabar yuboring.",
+            "reply_text": "Matn, ovozli xabar yoki rasm/chek yuboring.",
             "pending_action": None,
+            "ocr_receipt": None,
+            "has_health_context": False,
             "model_used": None,
             "latency_ms": 0.0,
             "session_id": sid,
@@ -338,7 +486,14 @@ async def process_user_turn(
     history = get_recent_history(sid, limit=HISTORY_WINDOW)
     passport = build_system_passport()
     config = _build_gemini_config(passport)
-    contents = _build_contents(history, clean_text, audio_bytes, audio_mime)
+    contents = _build_contents(
+        history,
+        clean_text,
+        audio_bytes,
+        audio_mime,
+        image_bytes=image_bytes,
+        image_mime=image_mime,
+    )
 
     used_tools: set[str] = set()
     proposed_action: dict | None = None
@@ -348,7 +503,10 @@ async def process_user_turn(
 
     try:
         for round_idx in range(MAX_TOOL_ROUNDS):
-            await _notify("thinking" if round_idx == 0 else "finalizing")
+            if round_idx == 0:
+                await _notify("ocr" if image_bytes else "thinking")
+            else:
+                await _notify("finalizing")
             resp, used_model, lat_ms = await router.generate_content(contents=contents, tier=tier, config=config)
             total_latency += lat_ms
             fcalls = _extract_function_calls(resp)
@@ -392,10 +550,18 @@ async def process_user_turn(
         if not reply_text:
             reply_text = "So'rovingiz qayta ishlandi, lekin aniq javob shakllanmadi. Iltimos, qayta so'rab ko'ring."
 
-        if _needs_medical_disclaimer(clean_text, reply_text, used_tools) and "103" not in reply_text:
+        has_health = _needs_medical_disclaimer(clean_text, reply_text, used_tools, pending_action=proposed_action)
+        if has_health and "103" not in reply_text:
             reply_text = reply_text + ai_tools.MEDICAL_DISCLAIMER
 
-        saved_user_content = clean_text if clean_text else "🎤 [Ovozli xabar]"
+        ocr_receipt = extract_ocr_receipt_hint(reply_text, clean_text) if (image_bytes and proposed_action is None) else None
+
+        if image_bytes:
+            saved_user_content = f"🖼 [Rasm / Chek] {clean_text}".strip()
+        elif audio_bytes:
+            saved_user_content = clean_text if clean_text else "🎤 [Ovozli xabar]"
+        else:
+            saved_user_content = clean_text
         save_chat_message(sid, "user", saved_user_content)
         save_chat_message(sid, "model", reply_text)
 
@@ -403,6 +569,8 @@ async def process_user_turn(
             "ok": True,
             "reply_text": reply_text,
             "pending_action": proposed_action,
+            "ocr_receipt": ocr_receipt,
+            "has_health_context": has_health,
             "model_used": used_model,
             "latency_ms": round(total_latency, 1),
             "session_id": sid,
@@ -413,6 +581,8 @@ async def process_user_turn(
             "ok": False,
             "reply_text": f"⚠️ {exc}",
             "pending_action": None,
+            "ocr_receipt": None,
+            "has_health_context": False,
             "model_used": None,
             "latency_ms": 0.0,
             "session_id": sid,
@@ -422,6 +592,8 @@ async def process_user_turn(
             "ok": False,
             "reply_text": f"⚠️ {exc}",
             "pending_action": None,
+            "ocr_receipt": None,
+            "has_health_context": False,
             "model_used": None,
             "latency_ms": round(total_latency, 1),
             "session_id": sid,
@@ -436,6 +608,8 @@ async def process_user_turn(
                 "Xatolik `/diagnostika` jurnaliga yozildi, botning qolgan barcha bo'limlari normal ishlamoqda."
             ),
             "pending_action": None,
+            "ocr_receipt": None,
+            "has_health_context": False,
             "model_used": used_model,
             "latency_ms": round(total_latency, 1),
             "session_id": sid,

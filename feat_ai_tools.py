@@ -36,6 +36,8 @@ SUPPORTED_WRITE_ACTIONS = {
     # 2. Bozorlik
     "market_add_planned",
     "market_remove_planned",
+    "market_add_active",
+    "market_checkout",
     # 3. Maktab
     "school_add_class_note",
     # 4. Universitet
@@ -125,6 +127,17 @@ def get_market_info(item_name: str = "") -> dict:
             "WHERE bi.basket_id = ? ORDER BY bi.id ASC",
             (planned_basket["id"],),
         )
+    active_basket = db.q1("SELECT id, title FROM market_baskets WHERE mode = 'active' AND status = 'draft' ORDER BY created_at DESC LIMIT 1")
+    active_items = []
+    if active_basket:
+        active_items = db.q(
+            "SELECT bi.id, mi.name, bi.quantity, bi.unit, bi.unit_price, bi.total_price, bi.is_bought, ml.name AS location "
+            "FROM market_basket_items bi "
+            "JOIN market_items mi ON mi.id = bi.item_id "
+            "LEFT JOIN market_locations ml ON ml.id = bi.location_id "
+            "WHERE bi.basket_id = ? ORDER BY bi.id ASC",
+            (active_basket["id"],),
+        )
     price_history = []
     query = (item_name or "").strip()
     if query:
@@ -139,6 +152,12 @@ def get_market_info(item_name: str = "") -> dict:
         )
     return {
         "planned_items": planned_items,
+        "active_basket": {
+            "id": active_basket["id"],
+            "title": active_basket["title"],
+            "items": active_items,
+            "bought_total": sum(float(i.get("total_price") or 0) for i in active_items if i.get("is_bought")),
+        } if active_basket else None,
         "item_query": query,
         "price_history": price_history,
     }
@@ -766,6 +785,50 @@ def resolve_schedule_key(p: dict) -> tuple[dict | None, str, list[dict]]:
     return None, "not_found", all_scheds
 
 
+def _normalize_pharmacy_form_unit(form_raw: Any, unit_raw: Any) -> tuple[str, str]:
+    """Dorixonadagi dori shakli va birligini (`dona`, `tyubik`, `flakon`, `tabletka`, `kapsula`) uyg'unlashtiradi."""
+    f = _norm_text(form_raw)
+    u = _norm_text(unit_raw)
+
+    # Birlik bo'yicha standart shakl (agar shakl berilmagan bo'lsa)
+    if not f:
+        if u in ("tyubik", "tube", "tuba"):
+            f = "maz"
+        elif u in ("flakon", "bottle", "shisha"):
+            f = "sirop"
+        elif u in ("kapsula", "capsule"):
+            f = "kapsula"
+        elif u in ("ampula", "ampoule"):
+            f = "ampula"
+        elif u in ("paket", "sache", "sashe", "paketcha"):
+            f = "kukun"
+        else:
+            f = "tabletka"
+
+    if not u:
+        try:
+            import feat_health as hl
+            u = hl.default_unit_for_form(f)
+        except Exception:
+            if f in ("maz", "gel", "krem", "balzam"):
+                u = "tyubik"
+            elif f in ("sirop", "sprey", "tomchi"):
+                u = "flakon"
+            elif f in ("kapsula",):
+                u = "kapsula"
+            else:
+                u = "dona"
+    else:
+        if u in ("tube", "tuba"):
+            u = "tyubik"
+        elif u in ("bottle", "shisha"):
+            u = "flakon"
+        elif u in ("pcs", "sht", "ta"):
+            u = "dona"
+
+    return f, u
+
+
 def validate_and_normalize_action(
     atype: str,
     params: dict | None,
@@ -856,6 +919,79 @@ def validate_and_normalize_action(
             p["quantity"] = _parse_positive_float(p.get("quantity"), default=1.0)
         return p, None
 
+    if atype == "market_add_active":
+        item_name = _first_non_empty(p, "item_name", "name", "item", "product")
+        if not item_name:
+            return p, "Xarid savatiga qo'shiladigan mahsulot nomini yozing."
+        p["item_name"] = item_name
+        p["quantity"] = _parse_positive_float(p.get("quantity"), default=1.0)
+        raw_tp = p.get("total_price") if p.get("total_price") is not None else p.get("price")
+        if raw_tp is not None and _clean_str(raw_tp) != "":
+            try:
+                tp = _normalize_amount(raw_tp)
+            except ValueError:
+                return p, f"«{item_name}» narxini to'g'ri raqam bilan kiriting."
+            if tp < 0:
+                return p, f"«{item_name}» narxi manfiy bo'lishi mumkin emas."
+            p["total_price"] = tp
+        else:
+            p["total_price"] = 0
+        return p, None
+
+    if atype == "market_checkout":
+        acc_q = _extract_account_query(p, ("account_query", "account", "account_name", "account_id", "card", "account_type"))
+        acc, st, cands = resolve_account(acc_q, allow_single_default=True, user_text=user_text, check_user_conflict=True)
+        if st != "ok" or not acc:
+            return p, _account_clarification_message(acc_q, st, cands, "hisob")
+        p["account_query"] = str(acc["id"])
+        p["resolved_account_name"] = acc["name"]
+
+        raw_items = p.get("items")
+        if isinstance(raw_items, list) and len(raw_items) > 0:
+            norm_items = []
+            for idx, it in enumerate(raw_items, start=1):
+                if not isinstance(it, dict):
+                    continue
+                iname = _first_non_empty(it, "item_name", "name", "item", "product")
+                if not iname:
+                    return p, f"Bozorlik ro'yxatidagi {idx}-mahsulot nomi ko'rsatilmagan."
+                qty = _parse_positive_float(it.get("quantity"), default=1.0)
+                unit = _clean_str(it.get("unit")) or "dona"
+                raw_p = it.get("total_price") if it.get("total_price") is not None else (
+                    it.get("price") if it.get("price") is not None else it.get("amount")
+                )
+                try:
+                    tp = _normalize_amount(raw_p)
+                except ValueError:
+                    return p, f"«{iname}» mahsulotining narxini (so'mda) aniq kiriting."
+                if tp <= 0:
+                    return p, f"«{iname}» mahsulotining narxi musbat bo'lishi kerak."
+                norm_items.append({
+                    "item_name": iname,
+                    "quantity": qty,
+                    "unit": unit,
+                    "total_price": tp,
+                    "location": _clean_str(it.get("location")) or _clean_str(p.get("location")) or None,
+                })
+            if not norm_items:
+                return p, "Bozorlik xaridini yakunlash uchun kamida bitta mahsulot va narxini ko'rsating."
+            p["items"] = norm_items
+            return p, None
+
+        # Mavjud ayni damdagi (active) savatni tekshirish
+        bid = _clean_str(p.get("basket_id"))
+        if bid:
+            basket = db.q1("SELECT * FROM market_baskets WHERE id = ? AND status = 'draft'", (bid,))
+        else:
+            basket = db.q1("SELECT * FROM market_baskets WHERE mode = 'active' AND status = 'draft' ORDER BY created_at DESC LIMIT 1")
+        if not basket:
+            return p, "Yakunlash uchun faol bozorlik savati topilmadi. Mahsulotlar va narxlarni yozing yoki avval savat oching."
+        bought = db.q("SELECT id, total_price FROM market_basket_items WHERE basket_id = ? AND is_bought = 1", (basket["id"],))
+        if not bought or sum(float(r.get("total_price") or 0) for r in bought) <= 0:
+            return p, "Faol bozorlik savatida narxi kiritilgan olingan mahsulotlar yo'q."
+        p["basket_id"] = basket["id"]
+        return p, None
+
     # ---- 3. MAKTAB ----
     if atype == "school_add_class_note":
         q_c = _first_non_empty(p, "class_name_or_course_id", "class_name", "course_id", "class")
@@ -913,6 +1049,27 @@ def validate_and_normalize_action(
             return p, "Aptechkaga qo'shiladigan dori yoki vosita nomini yozing."
         p["name"] = name
         p["quantity"] = _parse_positive_float(p.get("quantity"), default=1.0)
+        form_norm, unit_norm = _normalize_pharmacy_form_unit(p.get("form"), p.get("unit"))
+        p["form"] = form_norm
+        p["unit"] = unit_norm
+        loc_norm = _norm_text(p.get("location"))
+        p["location"] = "bag" if loc_norm in ("bag", "sumka", "sumkada") else "home"
+
+        raw_price = p.get("price") if p.get("price") is not None else p.get("amount")
+        if raw_price is not None and _clean_str(raw_price) != "":
+            try:
+                price_val = _normalize_amount(raw_price)
+            except ValueError:
+                return p, f"«{name}» narxini to'g'ri raqam bilan kiriting (masalan, 45 000 so'm)."
+            if price_val <= 0:
+                return p, f"«{name}» narxi musbat bo'lishi kerak."
+            acc_q = _extract_account_query(p, ("account_query", "account", "account_name", "account_id", "card", "account_type"))
+            acc, st, cands = resolve_account(acc_q, allow_single_default=True, user_text=user_text, check_user_conflict=True)
+            if st != "ok" or not acc:
+                return p, _account_clarification_message(acc_q, st, cands, "hisob")
+            p["price"] = price_val
+            p["account_query"] = str(acc["id"])
+            p["resolved_account_name"] = acc["name"]
         return p, None
 
     # ---- 6. CHELENJ ----
@@ -1162,6 +1319,7 @@ def propose_actions(summary_text: str, actions: list[dict], *, user_text: str | 
         "summary_text": summary,
         "actions_count": len(cleaned_actions),
         "status": "pending_confirmation",
+        "has_health_action": any(a["type"].startswith("health_") for a in cleaned_actions),
     }
 
 
@@ -1285,6 +1443,60 @@ def _exec_single_action(atype: str, p: dict) -> tuple[str, bool]:
         db.ex("DELETE FROM market_basket_items WHERE id = ?", (row["id"],))
         return f"🗑 Bozorlikdan o'chirildi: {row['name']}", False
 
+    if atype == "market_add_active":
+        import feat_market as mkt
+        item_name = _clean_str(p.get("item_name"))
+        qty = _parse_positive_float(p.get("quantity"), default=1.0)
+        unit = _clean_str(p.get("unit")) or None
+        total_price = float(p.get("total_price") or 0)
+        loc_name = _clean_str(p.get("location")) or None
+        basket = db.q1("SELECT id FROM market_baskets WHERE mode = 'active' AND status = 'draft' ORDER BY created_at DESC LIMIT 1")
+        bid = basket["id"] if basket else mkt.create_basket("active", location_name=loc_name)
+        res = mkt.add_basket_item(bid, item_name, qty, unit=unit, total_price=total_price, location_name=loc_name, force=True)
+        if not res.get("ok"):
+            raise ValueError(res.get("error") or "Savatga qo'shib bo'lmadi.")
+        price_part = f" — {mkt.fmt_sum(total_price)} so'm" if total_price > 0 else ""
+        return f"🛒 Faol savatga qo'shildi: {item_name} ({mkt.fmt_qty(qty)} {unit or 'kg'}){price_part}", False
+
+    if atype == "market_checkout":
+        import feat_market as mkt
+        acc, st, cands = resolve_account(p.get("account_query"), allow_single_default=True)
+        if st != "ok" or not acc:
+            raise ValueError(_account_clarification_message(_clean_str(p.get("account_query")), st, cands))
+
+        items = p.get("items")
+        if isinstance(items, list) and len(items) > 0:
+            loc_name = _clean_str(p.get("location")) or next((it.get("location") for it in items if it.get("location")), None)
+            bid = mkt.create_basket("active", location_name=loc_name)
+            for it in items:
+                add_r = mkt.add_basket_item(
+                    bid,
+                    it["item_name"],
+                    float(it["quantity"]),
+                    unit=it.get("unit"),
+                    total_price=float(it["total_price"]),
+                    location_name=it.get("location") or loc_name,
+                    force=True,
+                )
+                if not add_r.get("ok"):
+                    raise ValueError(add_r.get("error") or f"Mahsulot qo'shilmadi: {it['item_name']}")
+        else:
+            bid = _clean_str(p.get("basket_id"))
+            if not bid:
+                b_row = db.q1("SELECT id FROM market_baskets WHERE mode = 'active' AND status = 'draft' ORDER BY created_at DESC LIMIT 1")
+                bid = b_row["id"] if b_row else ""
+            if not bid:
+                raise ValueError("Faol bozorlik savati topilmadi.")
+
+        chk = mkt.checkout_basket(bid, int(acc["id"]))
+        if not chk.get("ok"):
+            raise ValueError(chk.get("error") or "Bozorlik xaridini yakunlab bo'lmadi.")
+        cnt = len(chk.get("items") or [])
+        return (
+            f"🏁 Bozorlik yakunlandi: {mkt.fmt_sum(chk['total_amount'])} so'm "
+            f"({chk['account_name']}, {cnt} ta mahsulot, Oziq-ovqat / Bozorlik)"
+        ), False
+
     # ---- 3. MAKTAB ----
     if atype == "school_add_class_note":
         import feat_education as edu
@@ -1366,26 +1578,73 @@ def _exec_single_action(atype: str, p: dict) -> tuple[str, bool]:
             item = db.q1("SELECT * FROM health_items WHERE is_active = 1 AND LOWER(name) LIKE LOWER(?) ORDER BY remaining_quantity DESC LIMIT 1", (f"%{q_i}%",))
         if not item:
             raise ValueError(f"Aptechkada topilmadi: {q_i}")
-        hl.execute_intake(item["id"])
-        return f"💊 Qabul qayd etildi: {item['name']}", False
+        res = hl.execute_intake(item["id"])
+        if not res.get("ok"):
+            raise ValueError(res.get("error") or "Qabul qayd etilmadi.")
+        qty_s = hl.fmt_qty(res["new_quantity"])
+        unit_s = item.get("unit") or "dona"
+        parts = [f"💊 Qabul qayd etildi: {item['name']} (qoldiq: {qty_s} {unit_s})"]
+        if res.get("low_stock"):
+            parts.append("⚠️ Zaxira kam qoldi, bozorlik ro'yxatiga qo'shib qo'yish tavsiya etiladi.")
+        ov = hl.check_overuse_alert(item["id"])
+        if ov:
+            parts.append(
+                f"⚠️ OGOHLANTIRISH: «{ov['category_name']}» ketma-ket 3 kundan beri qabul qilinmoqda — "
+                "o'z-o'zini davolash xavfli bo'lishi mumkin, iltimos shifokorga murojaat qiling!"
+            )
+        return "\n".join(parts), False
 
     if atype == "health_add_item":
+        import feat_health as hl
         name = _clean_str(p.get("name"))
         qty = _parse_positive_float(p.get("quantity"), default=1.0)
-        unit = _clean_str(p.get("unit")) or "dona"
+        form, unit = _normalize_pharmacy_form_unit(p.get("form"), p.get("unit"))
         loc = _clean_str(p.get("location")) or "home"
-        form = _clean_str(p.get("form")) or "tabletka"
         notes = _clean_str(p.get("notes"))
         existing = db.q1("SELECT * FROM health_items WHERE LOWER(name) = LOWER(?) AND is_active = 1", (name,))
         if existing:
-            db.ex("UPDATE health_items SET remaining_quantity = COALESCE(remaining_quantity, 0) + ?, is_seed = 0 WHERE id = ?", (qty, existing["id"]))
-            return f"💊 Aptechka yangilandi: {existing['name']} (+{qty:g} {unit})", False
-        db.ins(
-            "INSERT INTO health_items (name, kind, location, form, remaining_quantity, unit, low_stock_threshold, is_active, is_seed, notes) "
-            "VALUES (?, 'medicine', ?, ?, ?, ?, 2, 1, 0, ?)",
-            (name, loc, form, qty, unit, notes),
-        )
-        return f"💊 Aptechkaga qo'shildi: {name} ({qty:g} {unit})", False
+            db.ex(
+                "UPDATE health_items SET remaining_quantity = COALESCE(remaining_quantity, 0) + ?, "
+                "form = COALESCE(NULLIF(?, ''), form), unit = COALESCE(NULLIF(?, ''), unit), "
+                "location = ?, is_seed = 0 WHERE id = ?",
+                (qty, form, unit, loc, existing["id"]),
+            )
+            item_id = int(existing["id"])
+            item_name_disp = existing["name"]
+            base_line = f"💊 Aptechka yangilandi: {item_name_disp} (+{hl.fmt_qty(qty)} {unit})"
+        else:
+            item_id = db.ins(
+                "INSERT INTO health_items (name, kind, location, form, remaining_quantity, unit, low_stock_threshold, is_active, is_seed, notes) "
+                "VALUES (?, 'medicine', ?, ?, ?, ?, 2, 1, 0, ?)",
+                (name, loc, form, qty, unit, notes),
+            )
+            item_name_disp = name
+            base_line = f"💊 Aptechkaga qo'shildi: {item_name_disp} ({hl.fmt_qty(qty)} {unit}, {form})"
+
+        price = int(p.get("price") or 0)
+        if price > 0:
+            import feat_finance as fin
+            acc, st, cands = resolve_account(p.get("account_query"), allow_single_default=True)
+            if st != "ok" or not acc:
+                raise ValueError(_account_clarification_message(_clean_str(p.get("account_query")), st, cands))
+            cat_row = db.q1(
+                "SELECT id, name, icon FROM finance_categories "
+                "WHERE type = 'expense' AND is_active = 1 AND (LOWER(name) LIKE '%sog''liq%' OR LOWER(name) LIKE '%sport%' OR LOWER(name) LIKE '%dorixona%') "
+                "ORDER BY id LIMIT 1"
+            )
+            cat_id = int(cat_row["id"]) if cat_row else None
+            cat_label = f"{cat_row['icon']} {cat_row['name']}".strip() if cat_row else "💊 Sport / Sog'liq"
+            fin.record_transaction(
+                price,
+                cat_label,
+                f"Dorixona: {item_name_disp} ({hl.fmt_qty(qty)} {unit})",
+                from_account_id=int(acc["id"]),
+                category_id=cat_id,
+                linked_kind="health",
+                linked_id=item_id,
+            )
+            base_line += f" | 💸 {fin.fmt_sum(price)} so'm ({acc['name']}, {cat_label})"
+        return base_line, False
 
     # ---- 6. CHELENJ ----
     if atype == "challenge_complete_task":
@@ -1584,12 +1843,15 @@ async def execute_pending_action(action_id: str) -> dict:
         except Exception as exc:
             app.log.warning(f"AI action reschedule xatoligi: {exc}")
 
+    has_health_action = any(str(a.get("type") or "").startswith("health_") for a in row["actions"])
     db.ex("UPDATE ai_pending_actions SET status = 'confirmed' WHERE id = ?", (action_id,))
+    summary_out = "\n".join(results + errors)
     return {
         "ok": len(errors) == 0,
         "results": results,
         "errors": errors,
-        "summary": "\n".join(results + errors),
+        "summary": summary_out,
+        "has_health_action": has_health_action,
     }
 
 
@@ -1658,6 +1920,10 @@ def get_gemini_tool_declarations() -> list[dict]:
                 "Hech qachon to'g'ridan-to'g'ri yozmaydi, faqat tasdiqlash kartochkasi yaratadi. Multi-Action qo'llab-quvvatlaydi. "
                 "Muhim params: finance_expense/finance_income={amount, account_query, category, note}; "
                 "finance_transfer={amount, from_account_query, to_account_query, note}; "
+                "market_add_planned/market_add_active={item_name, quantity, unit, total_price, location}; "
+                "market_checkout={account_query, basket_id?, items?: [{item_name, quantity, unit, total_price, location}]}; "
+                "health_add_item={name, quantity, form ('tabletka'|'kapsula'|'maz'|'sirop'|'sprey'|'tomchi'), unit ('dona'|'tyubik'|'flakon'|'tabletka'|'kapsula'), location ('home'|'bag'), price?, account_query?}; "
+                "health_log_intake={item_name_or_id}; "
                 "schedule_update={schedule_key, time_hhmm, mode, prayer_ref, offset_minutes, only_today, is_enabled}; "
                 "dynamic_reminder_add={title, start_time ('HH:MM'), end_time, kind ('deadline'|'busy_block'), days_of_week ('all'|'0,2,4'|'once:YYYY-MM-DD')}."
             ),

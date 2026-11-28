@@ -406,25 +406,34 @@ def check_double_dose(item_id: int) -> dict | None:
 
 
 def check_overuse_alert(item_id: int) -> dict | None:
-    """Ketma-ket 3 kun bitta kategoriyadagi dori ichilganmi tekshiradi."""
-    item = db.q1("SELECT category_id FROM health_items WHERE id = ?", (item_id,))
-    if not item or not item.get("category_id"):
+    """Ketma-ket 3 kun bitta kategoriya (yoki aynan shu dori) qabul qilinganini tekshiradi."""
+    item = db.q1("SELECT id, name, category_id FROM health_items WHERE id = ?", (item_id,))
+    if not item:
         return None
-    cat_id = item["category_id"]
-    rows = db.q(
-        "SELECT DISTINCT DATE(l.taken_at) AS log_d "
-        "FROM health_intake_logs l JOIN health_items i ON i.id = l.item_id "
-        "WHERE i.category_id = ? ORDER BY log_d DESC LIMIT 4",
-        (cat_id,),
-    )
+    cat_id = item.get("category_id")
+    if cat_id:
+        rows = db.q(
+            "SELECT DISTINCT DATE(l.taken_at) AS log_d "
+            "FROM health_intake_logs l JOIN health_items i ON i.id = l.item_id "
+            "WHERE i.category_id = ? ORDER BY log_d DESC LIMIT 4",
+            (cat_id,),
+        )
+        cat = db.q1("SELECT name FROM health_categories WHERE id = ?", (cat_id,))
+        label = cat["name"] if cat else (item.get("name") or "bu kategoriya")
+    else:
+        rows = db.q(
+            "SELECT DISTINCT DATE(taken_at) AS log_d "
+            "FROM health_intake_logs WHERE item_id = ? ORDER BY log_d DESC LIMIT 4",
+            (item_id,),
+        )
+        label = item.get("name") or "ushbu dori"
     dates = {r["log_d"] for r in rows if r["log_d"]}
     today = app.today()
     d0 = today.isoformat()
     d1 = (today - timedelta(days=1)).isoformat()
     d2 = (today - timedelta(days=2)).isoformat()
     if d0 in dates and d1 in dates and d2 in dates:
-        cat = db.q1("SELECT name FROM health_categories WHERE id = ?", (cat_id,))
-        return {"overuse": True, "category_name": cat["name"] if cat else "bu kategoriya"}
+        return {"overuse": True, "category_name": label}
     return None
 
 
